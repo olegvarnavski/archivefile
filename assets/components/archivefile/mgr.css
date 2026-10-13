@@ -3,3 +3,5 @@
 #archivefile-app{max-width:none;box-sizing:border-box;overflow-y:auto;min-height:280px}#archivefile-app th,#archivefile-app td{vertical-align:middle}#archivefile-app .fa-icon{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;font-size:22px;border:1px solid #cfd6df;border-radius:4px;background:#edf1f5;color:#263344;text-decoration:none;box-sizing:border-box}#archivefile-app .fa-actions{align-items:center;gap:6px}#fa-expanded>td{padding:16px;background:#f4f6f8}#fa-expanded .fa-card{margin:0}#archivefile-app hr{border:0;border-top:1px solid #dce2e9;margin:26px 0}#archivefile-app .fa-error{max-width:none}#archivefile-app .fa-fields{grid-template-columns:1fr}#archivefile-app button:focus-visible,#archivefile-app a:focus-visible{outline:2px solid #1764ac;outline-offset:2px}
 
 #archivefile-app .fa-warning{color:#9a6500;overflow-wrap:anywhere}#fa-monitor{padding:12px;background:#fff8e7;border-radius:4px}
+
+#fa-xml-options{border:1px solid #dce2e9;padding:18px;margin:20px 0}#fa-xml-options legend{font-weight:bold}#fa-preview-result{white-space:pre-wrap;overflow-wrap:anywhere}#fa-preview-result:empty{display:none}

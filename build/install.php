@@ -12,8 +12,8 @@ if ($action === xPDOTransport::ACTION_UNINSTALL) {
     // Keep files, namespace, settings, tables and copies for safe reinstallation.
     return true;
 }
-if (version_compare(PHP_VERSION, '7.4.0', '<') || !extension_loaded('curl') || !class_exists('XMLReader') || !extension_loaded('pdo_mysql')) {
-    $modx->log(modX::LOG_LEVEL_ERROR, 'ArchiveFile requires PHP 7.4+, cURL, XMLReader and PDO MySQL');
+if (version_compare(PHP_VERSION, '7.4.0', '<') || !extension_loaded('curl') || (!class_exists('XMLReader') || !class_exists('DOMDocument')) || !extension_loaded('pdo_mysql')) {
+    $modx->log(modX::LOG_LEVEL_ERROR, 'ArchiveFile requires PHP 7.4+, cURL, DOM, XMLReader and PDO MySQL');
     return false;
 }
 try {

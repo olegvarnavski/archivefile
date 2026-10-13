@@ -64,9 +64,9 @@ $temp = sys_get_temp_dir() . '/archivefile-install-' . bin2hex(random_bytes(6)) 
 mkdir($temp . 'core', 0750, true); mkdir($temp . 'assets', 0750, true);
 define('MODX_CORE_PATH', $temp . 'core/'); define('MODX_ASSETS_PATH', $temp . 'assets/'); define('MODX_BASE_PATH', $temp); define('MODX_ASSETS_URL', '/assets/');
 file_put_contents($temp . 'config.core.php', '<?php // test bootstrap');
-$stage = dirname(__DIR__) . '/dist/archivefile-1.3.0-pl/';
+$stage = dirname(__DIR__) . '/dist/archivefile-1.4.0-pl/';
 $manifest = include $stage . 'manifest.php';
-$transport = (object)array('xpdo' => new modX(), 'path' => dirname($stage) . '/', 'signature' => 'archivefile-1.3.0-pl');
+$transport = (object)array('xpdo' => new modX(), 'path' => dirname($stage) . '/', 'signature' => 'archivefile-1.4.0-pl');
 $vehicle = new xPDOScriptVehicle();
 $vehicle->payload = include $stage . $manifest['manifest-vehicles'][0]['filename'];
 try {
@@ -79,7 +79,9 @@ try {
     check(count($service->sources()) === 0, 'install starts without example sources');
     $service->save(array('name' => 'Моё название', 'url' => 'https://example.org/feed.xml', 'enabled' => 0));
     $service->save(array('id' => 1, 'name' => 'Моё название', 'url' => 'https://example.org/feed.xml', 'enabled' => 0));
+    $custom=array('id'=>1,'name'=>'Моё название','url'=>'https://example.org/feed.xml','enabled'=>0,'offer_element'=>'item','offer_attribute'=>'','date_element'=>'updated','container_path'=>'catalog/items','split_enabled'=>1,'split_limit'=>750);$service->save($custom);
     check($vehicle->install($transport, array('package_action' => xPDOTransport::ACTION_UPGRADE)), 'upgrade succeeds');
+    check($service->xmlOptions(1)['split_limit']===750 && $service->xmlOptions(1)['offer_element']==='item','upgrade preserves XML options');
     check(count($service->sources()) === 1 && $service->source(1)['name'] === 'Моё название', 'upgrade preserves settings and does not duplicate source');
     check($vehicle->uninstall($transport, array('package_action' => xPDOTransport::ACTION_UNINSTALL)), 'uninstall succeeds');
     check($transport->xpdo->getObject('modMenu', 'archivefile') === null, 'uninstall removes menu');

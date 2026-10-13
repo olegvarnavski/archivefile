@@ -44,6 +44,17 @@
       else fallback();
     }
     function setBusy(value) { busy = value; root.querySelectorAll('button').forEach(function (b) { b.disabled = value; }); }
+    function xmlData() {
+      return {offer_element:form.elements.offer_element.value,offer_attribute:form.elements.offer_attribute.value,date_element:form.elements.date_element.value,
+        container_path:form.elements.container_path.value,split_enabled:form.elements.split_enabled.checked?1:0,split_limit:form.elements.split_limit.value};
+    }
+    function showParts(s) {
+      var rows=s&&s.parts||[],tbody=document.getElementById('fa-parts');tbody.textContent='';document.getElementById('fa-parts-block').hidden=!rows.length;
+      rows.forEach(function(p,i){var tr=document.createElement('tr');cell(tr,p.filename);cell(tr,p.offers_count);cell(tr,(Number(p.size_bytes)/1024).toFixed(1)+' КБ');
+        var td=cell(tr,''),actions=document.createElement('div');actions.className='fa-actions';td.appendChild(actions);
+        var a=document.createElement('a');a.href=p.url;a.textContent='↓';a.title='Скачать часть';a.setAttribute('aria-label',a.title);a.className='fa-icon';a.target='_blank';a.rel='noopener';actions.appendChild(a);
+        actions.appendChild(icon('Копировать ссылку на часть','⧉',function(){copy(p.url);}));tbody.appendChild(tr);});
+    }
     function load() {
       return api('list').then(function (data) {
         sources = data.sources;
@@ -68,7 +79,7 @@
         var tbody = document.getElementById('fa-sources'); tbody.textContent = '';
         sources.forEach(function (s) {
           var row = document.createElement('tr'), last = s.latest || {};
-          cell(row, s.name); cell(row, date(last.generation_date)); cell(row, last.offers_count); cell(row, date(s.last_success));
+          cell(row, s.name); cell(row, date(last.generation_date),'fa-feed-date'); cell(row, last.offers_count); cell(row, date(s.last_success));
           cell(row, s.last_error || s.warning || (!s.enabled || s.enabled === '0' ? 'Отключено' : s.last_success ? 'Успешно' : 'Ещё не скачивалось'), s.last_error ? 'fa-error' : s.warning ? 'fa-warning' : 'fa-ok');
           row.setAttribute('data-source-id',s.id);
           var td=cell(row,''), actions=document.createElement('div');actions.className='fa-actions';td.appendChild(actions);
@@ -79,6 +90,8 @@
           actions.appendChild(icon('Удалить источник и архив','×',function(){removeSource(s);}));
           tbody.appendChild(row);
         });
+        var showDate=sources.some(function(s){return s.latest&&s.latest.generation_date&&(!s.xml_options||s.xml_options.date_element);});
+        document.getElementById('fa-sources').parentNode.querySelectorAll('.fa-feed-date').forEach(function(el){el.hidden=!showDate;});
         if(current){var selected=sources.find(function(s){return Number(s.id)===current;});if(selected)open(selected);else closeDetail();}
         if (!sources.length) { var tr = document.createElement('tr'); cell(tr, 'Добавьте первую ссылку').colSpan = 6; tbody.appendChild(tr); }
       });
@@ -88,7 +101,7 @@
         if (Number(form.elements.id.value) !== Number(id)) return;
         var tbody = document.getElementById('fa-copies'); tbody.textContent = '';
         rows.forEach(function (c, i) {
-          var tr = document.createElement('tr'); cell(tr, date(c.downloaded_at)); cell(tr, date(c.generation_date));
+          var tr = document.createElement('tr'); cell(tr, date(c.downloaded_at)); cell(tr, date(c.generation_date),'fa-feed-date');
           var count = c.offers_count;
           if (count !== null && rows[i + 1] && rows[i + 1].offers_count !== null) {
             var delta = Number(count) - Number(rows[i + 1].offers_count); count = count + ' (' + (delta > 0 ? '+' : '') + delta + ')';
@@ -98,6 +111,8 @@
           var a = document.createElement('a'); a.href = c.url; a.textContent = '↓'; a.className='fa-icon';a.title='Скачать копию';a.setAttribute('aria-label',a.title); a.target = '_blank'; a.rel = 'noopener'; actions.appendChild(a);
           actions.appendChild(icon('Копировать ссылку на копию','⧉',function(){copy(c.url);})); td.appendChild(actions); tbody.appendChild(tr);
         });
+        var showDate=form.elements.date_element.value!==''&&rows.some(function(c){return !!c.generation_date;});
+        document.getElementById('fa-copies').parentNode.querySelectorAll('.fa-feed-date').forEach(function(el){el.hidden=!showDate;});
         if (!rows.length) { var tr = document.createElement('tr'); cell(tr, 'Сохранённых копий пока нет').colSpan = 5; tbody.appendChild(tr); }
       });
     }
@@ -121,6 +136,9 @@
       document.getElementById('fa-latest-url').value = s ? s.latest_url : '';
       document.getElementById('fa-copies').textContent = '';
       if (current) loadCopies(current).catch(function (e) { notify(e.message, true); });
+      var o=s&&s.xml_options||{offer_element:'offer',offer_attribute:'internal-id',date_element:'generation-date',container_path:'',split_enabled:0,split_limit:1000};
+      ['offer_element','offer_attribute','date_element','container_path','split_limit'].forEach(function(k){form.elements[k].value=o[k];});form.elements.split_enabled.checked=!!Number(o.split_enabled);
+      document.getElementById('fa-xml-options').hidden=form.elements.format.value!=='xml';document.getElementById('fa-preview-result').textContent='';showParts(s);
       form.elements.name.focus();
     }
     document.getElementById('fa-add').onclick = function () { open(null); };
@@ -128,10 +146,13 @@
     document.getElementById('fa-copy-latest').onclick = function () { copy(document.getElementById('fa-latest-url').value); };
     form.onsubmit = function (e) {
       e.preventDefault(); if (busy) return; setBusy(true);
-      api('save', {id: form.elements.id.value, name: form.elements.name.value, url: form.elements.url.value, format: form.elements.format.value, enabled: form.elements.enabled.checked ? 1 : 0})
+      api('save', Object.assign(xmlData(),{id: form.elements.id.value, name: form.elements.name.value, url: form.elements.url.value, format: form.elements.format.value, enabled: form.elements.enabled.checked ? 1 : 0}))
         .then(function (r) { return load().then(function () { open(sources.find(function (s) { return Number(s.id) === Number(r.id); })); notify('Настройки сохранены'); }); })
         .catch(function (e) { notify(e.message, true); }).finally(function () { setBusy(false); });
     };
+    form.elements.format.onchange=function(){document.getElementById('fa-xml-options').hidden=this.value!=='xml';};
+    document.getElementById('fa-preview').onclick=function(){if(busy)return;setBusy(true);var result=document.getElementById('fa-preview-result');result.textContent='Проверка…';
+      api('preview',Object.assign(xmlData(),{url:form.elements.url.value})).then(function(r){result.textContent='Предложений: '+r.offers_count+'\nДата: '+(r.generation_date||'не найдена — будет скрыта')+'\nЧастей: '+r.parts_count+'\n'+(r.valid?'Проверка пройдена':'Нет предложений — загрузка будет отклонена')+'\n\nПример:\n'+(r.sample||'не найден');}).catch(function(e){result.textContent=e.message;}).finally(function(){setBusy(false);});};
     document.getElementById('fa-fetch').onclick = function(){if(current)refresh(current);};
     function resize(){root.style.height=Math.max(280,window.innerHeight-root.getBoundingClientRect().top-12)+'px';}
     resize();window.addEventListener('resize',resize);

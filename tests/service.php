@@ -15,6 +15,7 @@ class FakeModx {
         $this->db = new PDO('sqlite::memory:');
         $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->db->exec('CREATE TABLE test_archivefile_sources (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,url TEXT,format TEXT,enabled INTEGER,last_success TEXT,last_daily_date TEXT,last_error TEXT,created_at TEXT)');
+        $this->db->exec('CREATE TABLE test_archivefile_options (id INTEGER PRIMARY KEY,settings TEXT)');
         $this->db->exec('CREATE TABLE test_archivefile_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source_id INTEGER,source_name TEXT,kind TEXT,status TEXT,started_at TEXT,finished_at TEXT,duration_ms INTEGER,size_bytes INTEGER,offers_count INTEGER,message TEXT,warning TEXT)');
         $this->db->exec('CREATE TABLE test_archivefile_copies (id INTEGER PRIMARY KEY AUTOINCREMENT,source_id INTEGER,filename TEXT,downloaded_at TEXT,generation_date TEXT,offers_count INTEGER,size_bytes INTEGER,sha256 TEXT)');
     }
@@ -119,6 +120,38 @@ try {
     check($service->cronStatus()['last']['status']==='error', 'failed cron status retained');
     $service->query('UPDATE '.$service->table('events').' SET started_at=? WHERE id=?',array('2020-01-01T00:00:00+03:00',$run));
     check($service->cronStatus()['stale'], 'overdue cron detected');
+    $c=$service->save(array('name'=>'Custom XML','url'=>'https://example.org/custom.xml','format'=>'xml','enabled'=>1,
+        'offer_element'=>'item','offer_attribute'=>'','date_element'=>'updated','container_path'=>'catalog/items','split_enabled'=>1,'split_limit'=>1000));
+    $service->xml='<catalog xmlns="urn:test" xmlns:p="urn:attr"><updated>2026-10-13</updated><title>Shared</title><items>';
+    for($i=0;$i<2500;$i++)$service->xml.='<item p:id="'.$i.'"><name>Object '.$i.'</name></item>';
+    $service->xml.='</items><footer>Keep footer</footer></catalog>';
+    $preview=$service->preview(array_merge($service->xmlOptions($c),array('url'=>'https://example.org/custom.xml')));
+    check($preview['offers_count']===2500 && $preview['parts_count']===3 && strpos($preview['sample'],'Object 0')!==false, 'preview counts custom items and parts without archive');
+    check(!$service->copies($c),'preview creates no archived copy');
+    $service->fetch($c);$parts=$service->parts($c);
+    check(array_column($parts,'offers_count')===array(1000,1000,500),'split 2500 into 1000+1000+500');
+    foreach($parts as $part){$path=MODX_ASSETS_PATH.'archivefile/'.$c.'/parts/'.$part['filename'];$parsed=ArchiveFileXmlTools::parse($path,$service->xmlOptions($c));
+        check($parsed['offers_count']===$part['offers_count'] && $parsed['generation_date']==='2026-10-13', 'part count and date verified');
+        $bytes=file_get_contents($path);check(strpos($bytes,'Shared')!==false && strpos($bytes,'Keep footer')!==false && strpos($bytes,'urn:attr')!==false,'shared metadata and namespaces retained');}
+    $target=MODX_ASSETS_PATH.'archivefile/'.$c.'/lastfile.xml';$oldBytes=file_get_contents($target);$oldParts=$service->parts($c);$oldIds=array_column($service->copies($c),'id');
+    $service->xml='<catalog><items/></catalog>';
+    fails(function() use($service,$c){$service->fetch($c);},'empty custom feed rejected');
+    check(file_get_contents($target)===$oldBytes && $service->parts($c)===$oldParts,'zero offers preserves full file and parts');
+    $service->xml='<catalog><items>';for($i=0;$i<2001;$i++)$service->xml.='<item/>';$service->xml.='</items></catalog>';
+    rename($target,$target.'.saved');mkdir($target);
+    fails(function() use($service,$c){$service->fetch($c);},'full-file publication failure after parts swap');
+    check($service->parts($c)===$oldParts && array_column($service->copies($c),'id')===$oldIds,'publication failure restores previous parts and history');
+    rmdir($target);rename($target.'.saved',$target);
+    $service->xml='<catalog><items>';for($i=0;$i<1500;$i++)$service->xml.='<item/>';$service->xml.='</items></catalog>';$service->fetch($c);
+    check(count($service->parts($c))===2&&!is_file(MODX_ASSETS_PATH.'archivefile/'.$c.'/parts/part-003.xml'),'obsolete third part removed');
+    $service->xml='<catalog><items><item/></items></catalog>';$service->fetch($c);
+    check(!$service->parts($c),'feed below limit keeps full file without parts');
+    $o=$service->xmlOptions($c);check($o['offer_element']==='item'&&$o['offer_attribute']==='','source XML settings persisted');
+    fails(function(){ArchiveFileXmlTools::options(array('offer_element'=>'//item'));},'arbitrary XPath blocked');
+    fails(function(){ArchiveFileXmlTools::options(array('split_limit'=>0));},'zero split limit blocked');
+    $ambiguous=$storage.'ambiguous.xml';file_put_contents($ambiguous,'<r><a><item/></a><b><item/></b></r>');
+    fails(function() use($ambiguous){ArchiveFileXmlTools::parse($ambiguous,array('offer_element'=>'item','offer_attribute'=>'','split_enabled'=>1));},'ambiguous containers rejected');
+    $service->delete($c);check(!is_dir(MODX_ASSETS_PATH.'archivefile/'.$c.'/parts'),'delete removes parts');
     $service->delete($b);
     fails(function () use ($service,$b) { $service->source($b); }, 'deleted source absent');
     check(!$service->copies($b) && !glob($storage . 'source-' . $b . '-*.*') && !glob(MODX_ASSETS_PATH . 'archivefile/' . $b . '/lastfile.*'), 'delete clears history and public bytes');

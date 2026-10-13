@@ -19,6 +19,7 @@ try {
         case 'list':
             $data = array('sources' => $service->sources(), 'monitor' => $service->cronStatus(), 'events' => $service->events(), 'cron' => escapeshellarg($modx->getOption('archivefile.cron_php_path', null, '/usr/bin/php7.4')) . ' ' . escapeshellarg(MODX_CORE_PATH . 'components/archivefile/cron.php'));
             break;
+        case 'preview': @set_time_limit(150); session_write_close(); $data=$service->preview($_POST); break;
         case 'copies': $data = $service->copies(isset($_POST['id']) ? $_POST['id'] : 0); break;
         case 'save': $data = array('id' => $service->save($_POST)); break;
         case 'delete': $data = $service->delete(isset($_POST['id']) ? $_POST['id'] : 0); break;
