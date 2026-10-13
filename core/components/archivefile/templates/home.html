@@ -1,0 +1,18 @@
+<div id="archivefile" class="fa-wrap">
+  <div class="fa-heading"><div><h2>Archive File</h2><p>Ежедневное скачивание · Последние 5 успешных копий каждой ссылки</p></div><button id="fa-add" type="button" class="fa-primary">+ Добавить ссылку</button></div>
+  <p id="fa-message" role="status" aria-live="polite"></p>
+  <section class="fa-card"><div class="fa-scroll"><table><thead><tr><th>Название</th><th>Обновление фида</th><th>Предложений</th><th>Последнее скачивание</th><th>Статус</th><th></th></tr></thead><tbody id="fa-sources"></tbody></table></div></section>
+  <section id="fa-detail" class="fa-card" hidden>
+    <h3 id="fa-title">Новая ссылка</h3>
+    <form id="fa-form"><input type="hidden" name="id" value="0">
+      <div class="fa-fields"><label>Название<input name="name" required maxlength="100" placeholder="Например, Каталог недвижимости"></label><label>URL файла<input name="url" type="url" required placeholder="https://…"></label></div>
+      <div class="fa-fields"><label>Формат<select name="format"><option value="xml">XML — дата и количество предложений</option><option value="csv">CSV</option><option value="xlsx">XLSX</option><option value="xls">XLS</option><option value="pdf">PDF</option><option value="zip">ZIP</option><option value="json">JSON</option><option value="txt">TXT</option></select></label><label class="fa-check"><input name="enabled" type="checkbox" checked> Ежедневное скачивание включено</label></div>
+      <p class="fa-note">XML: дата из generation-date; количество элементов offer с атрибутом internal-id.</p>
+      <div class="fa-actions"><button type="submit" class="fa-primary">Сохранить</button><button id="fa-fetch" type="button">Принудительно скачать</button><button id="fa-close" type="button">Закрыть</button></div>
+    </form>
+    <div id="fa-latest" class="fa-latest" hidden><label>Постоянная ссылка на последнюю успешную копию<input id="fa-latest-url" readonly></label><button id="fa-copy-latest" type="button">Копировать ссылку</button></div>
+    <hr><h3>Последние 5 копий</h3><p class="fa-note">Ссылка на конкретную копию действует, пока копия входит в последние пять. Постоянная ссылка всегда выдаёт самую свежую.</p>
+    <div class="fa-scroll"><table><thead><tr><th>Скачивание</th><th>Обновление фида</th><th>Предложений</th><th>Размер</th><th>Действия</th></tr></thead><tbody id="fa-copies"></tbody></table></div>
+  </section>
+  <section class="fa-card"><h3>Запуск по расписанию</h3><p>Добавьте эту команду в cron хостинга на ежедневный запуск в 03:00 по Москве. Время cron зависит от часового пояса хостинга.</p><code id="fa-cron">Загрузка…</code><p class="fa-note">Требуются PHP 7.4+, cURL, XMLReader и PDO MySQL. Лимит файла по умолчанию — 50 МБ. Ошибка скачивания не удаляет предыдущие копии.</p></section>
+</div>

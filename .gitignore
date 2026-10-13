@@ -1,0 +1,8 @@
+dist/
+node_modules/
+*.log
+.env*
+core/components/archivefile/runtime.php
+assets/components/archivefile/runtime.php
+core/components/archivefile/storage/
+assets/archivefile/
