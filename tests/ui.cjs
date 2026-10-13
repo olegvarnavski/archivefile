@@ -7,22 +7,24 @@ const w=dom.window,d=w.document;w.ArchiveFileConfig={connector:'/connector',csrf
 let sources=[{id:1,name:'Каталог',url:'https://example.org/feed.xml',format:'xml',enabled:1,latest:{offers_count:42},latest_url:'https://example.org/assets/archivefile/source-1.xml'}],calls=[];
 w.confirm=()=>true;d.execCommand=()=>true;
 w.fetch=async(url,opt)=>{let p=opt.body,a=p.get('action');calls.push(a);let data;
-if(a==='list')data={sources,cron:'php cron.php'};
-if(a==='copies')data=Array.from({length:5},(_,i)=>({id:i,offers_count:42-i,size_bytes:1024,url:'/copy/'+i}));
+if(a==='list')data={sources,cron:'php cron.php',monitor:{stale:true,hours:36,last:null},events:[{id:1,source_name:'Каталог',kind:'manual',status:'error',started_at:'2026-10-13T03:00:00+03:00',duration_ms:123,size_bytes:null,offers_count:0,message:'XML без предложений',warning:null}]};
+if(a==='copies')data=Array.from({length:3},(_,i)=>({id:i,offers_count:42-i,size_bytes:1024,url:'/copy/'+i}));
 if(a==='fetch')data={id:6};
 if(a==='delete'){sources=[];data={deleted:true};}
 if(a==='save'){sources.push({id:2,name:p.get('name'),url:p.get('url'),format:'xml',enabled:1,latest_url:'/latest'});data={id:2};}
 return {json:async()=>({success:true,data})};};
 const check=(v,s)=>{if(!v)throw Error(s);console.log('PASS '+s);};
 async function wait(fn){for(let i=0;i<100;i++){if(fn())return;await new Promise(r=>setTimeout(r,5));}throw Error('timeout');}
-(async()=>{w.eval(fs.readFileSync(base+'/assets/components/archivefile/mgr.js','utf8'));await wait(()=>d.querySelector('button[aria-label="Настройки и последние 5 копий"]'));
+(async()=>{w.eval(fs.readFileSync(base+'/assets/components/archivefile/mgr.js','utf8'));await wait(()=>d.querySelector('button[aria-label="Настройки и последние 3 копии"]'));
 
-d.querySelector('button[aria-label="Настройки и последние 5 копий"]').click();await wait(()=>d.querySelectorAll('#fa-copies tr').length===5);
+d.querySelector('button[aria-label="Настройки и последние 3 копии"]').click();await wait(()=>d.querySelectorAll('#fa-copies tr').length===3);
 check(d.querySelector('#fa-expanded #fa-detail'),'details inside source table');
+check(d.querySelector('#fa-monitor').textContent.includes('36'),'cron overdue warning visible');
+check(d.querySelector('#fa-events').textContent.includes('XML без предложений'),'journal shows failure reason');
 check(d.querySelector('#archivefile').textContent==='Archive File menu' && !d.querySelector('#archivefile #fa-detail'),'MODX menu ID collision does not move panel into menu');
 check(d.querySelector('#fa-title').textContent.includes('Настройки источника'),'settings heading');
-check(d.querySelector('#fa-detail').textContent.includes('Последние 5 копий'),'history heading');
-check(d.querySelectorAll('#fa-copies a[aria-label]').length===5,'accessible download icons');
+check(d.querySelector('#fa-detail').textContent.includes('Последние 3 копии'),'history heading');
+check(d.querySelectorAll('#fa-copies a[aria-label]').length===3,'accessible download icons');
 check(d.querySelector('#archivefile-app').style.height.endsWith('px'),'scroll viewport height');
 d.querySelector('button[aria-label="Принудительно скачать новую копию"]').click();await wait(()=>calls.includes('fetch')&&!d.querySelector('#fa-add').disabled);
 check(d.querySelector('#fa-expanded #fa-detail'),'expanded source survives refresh');

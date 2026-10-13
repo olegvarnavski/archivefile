@@ -15,6 +15,7 @@ class FakeModx {
         $this->db = new PDO('sqlite::memory:');
         $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         $this->db->exec('CREATE TABLE test_archivefile_sources (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,url TEXT,format TEXT,enabled INTEGER,last_success TEXT,last_daily_date TEXT,last_error TEXT,created_at TEXT)');
+        $this->db->exec('CREATE TABLE test_archivefile_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source_id INTEGER,source_name TEXT,kind TEXT,status TEXT,started_at TEXT,finished_at TEXT,duration_ms INTEGER,size_bytes INTEGER,offers_count INTEGER,message TEXT,warning TEXT)');
         $this->db->exec('CREATE TABLE test_archivefile_copies (id INTEGER PRIMARY KEY AUTOINCREMENT,source_id INTEGER,filename TEXT,downloaded_at TEXT,generation_date TEXT,offers_count INTEGER,size_bytes INTEGER,sha256 TEXT)');
     }
     public function connect() { $this->pdo = $this->db; return true; }
@@ -46,8 +47,8 @@ try {
     for ($i = 0; $i < 6; $i++) { $service->fetch($a); }
     $service->fetch($b);
     $rows = $service->copies($a);
-    check(count($rows) === 5, 'keep five copies after six successful downloads');
-    check(count(glob($storage . 'source-' . $a . '-*.xml')) === 5, 'remove old bytes from disk');
+    check(count($rows) === 3, 'keep three copies after six successful downloads');
+    check(count(glob($storage . 'source-' . $a . '-*.xml')) === 3, 'remove old bytes from disk');
     check(count($service->copies($b)) === 1, 'sources have separate archives');
     check((int)$rows[0]['offers_count'] === 3, 'count namespaced offers with attribute, including duplicates');
     check($rows[0]['generation_date'] === '2026-10-13T02:45:00+03:00', 'read generation-date from XML');
@@ -68,15 +69,23 @@ try {
     $service->xml = '<r><offer internal-id="1"></r>';
     fails(function () use ($service, $a) { $service->fetch($a); }, 'malformed XML rejected');
     check(array_column($service->copies($a), 'id') === $ids, 'malformed XML preserves all previous copies');
+    $service->xml = '';
+    fails(function() use($service,$a){$service->fetch($a);}, 'empty response rejected');
+    check(array_column($service->copies($a),'id')===$ids,'empty response preserves copies');
     $service->networkError = true;
     fails(function () use ($service, $a) { $service->fetch($a); }, 'download error');
     check(array_column($service->copies($a), 'id') === $ids, 'download error preserves all previous copies');
     check(hash_file('sha256', $public) === $publicHash, 'failed download preserves static latest');
     check(count(glob($storage . 'tmp-*')) === 0, 'temporary files cleaned after failures');
-    $service->networkError = false; $service->xml = '<r/>';
+    $service->networkError = false;
+    $service->xml = '<r/>';
+    fails(function() use($service,$a){$service->fetch($a);}, 'zero-offer XML rejected');
+    check(array_column($service->copies($a),'id')===$ids && hash_file('sha256',$public)===$publicHash, 'zero offers preserves three copies and lastfile');
+    $service->xml = '<r><offer internal-id="ok"/></r>';
     $service->fetch($a, true);
     check(!empty($service->fetch($a, true)['skipped']), 'daily cron deduplicated by Moscow date');
-    check((int)$service->copies($a)[0]['offers_count'] === 0, 'zero offers is valid');
+    check(!empty($service->sources()[0]['warning']), 'sharp offer drop produces source warning');
+    check((int)$service->copies($a)[0]['offers_count'] === 1, 'positive offers retained');
     check($service->copies($a)[0]['generation_date'] === null, 'missing generation-date stays unknown');
     check($service->source($a)['last_error'] === null, 'successful retry clears error');
     $service->save(array('id' => $b, 'name' => 'Источник Б', 'url' => 'https://example.org/other.xml', 'enabled' => 0));
@@ -96,6 +105,20 @@ try {
         fails(function () use ($urlMethod, $service, $ip) { $urlMethod->invoke($service, $ip); }, 'SSRF blocks ' . $ip);
     }
     check($urlMethod->invoke($service, '8.8.8.8') === '8.8.8.8', 'public IP accepted');
+    $cronLock=$service->cronLock();
+    check($cronLock && $service->cronLock()===false, 'parallel cron blocked');flock($cronLock,LOCK_UN);fclose($cronLock);
+    $rows=$service->copies($a);$path=$storage.$rows[count($rows)-1]['filename'];$bytes=file_get_contents($path);file_put_contents($path,str_repeat('x',strlen($bytes)));
+    check(count($service->copies($a))===2,'same-size corrupt bytes excluded by checksum');file_put_contents($path,$bytes);
+    $events=$service->events();
+    check(count($events)>0 && in_array('error',array_column($events,'status'),true), 'journal records failed attempts');
+    check(in_array('ok',array_column($events,'status'),true) && in_array('manual',array_column($events,'kind'),true), 'journal records manual success');
+    check($service->cronStatus()['last']===null && $service->cronStatus()['stale'], 'manual downloads do not fake cron heartbeat');
+    $run=$service->beginEvent('cron');$service->finishEvent($run,'ok',microtime(true),'test cron');
+    check(!$service->cronStatus()['stale'] && $service->cronStatus()['last']['status']==='ok', 'completed cron heartbeat');
+    $run=$service->beginEvent('cron');$service->finishEvent($run,'error',microtime(true),'HTTP failure');
+    check($service->cronStatus()['last']['status']==='error', 'failed cron status retained');
+    $service->query('UPDATE '.$service->table('events').' SET started_at=? WHERE id=?',array('2020-01-01T00:00:00+03:00',$run));
+    check($service->cronStatus()['stale'], 'overdue cron detected');
     $service->delete($b);
     fails(function () use ($service,$b) { $service->source($b); }, 'deleted source absent');
     check(!$service->copies($b) && !glob($storage . 'source-' . $b . '-*.*') && !glob(MODX_ASSETS_PATH . 'archivefile/' . $b . '/lastfile.*'), 'delete clears history and public bytes');

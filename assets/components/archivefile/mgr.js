@@ -25,7 +25,7 @@
     function refresh(id) {
       if (busy) return; setBusy(true); notify('Скачивание и проверка файла…');
       api('fetch',{id:id}).then(load).then(function(){if(current===Number(id))return loadCopies(id);})
-        .then(function(){notify('Файл сохранён. В архиве оставлены последние 5 копий.');})
+        .then(function(){notify('Файл сохранён. В архиве оставлены последние 3 копии.');})
         .catch(function(e){notify(e.message,true);return load().catch(function(){});}).finally(function(){setBusy(false);});
     }
     function removeSource(s) {
@@ -48,15 +48,31 @@
       return api('list').then(function (data) {
         sources = data.sources;
         document.getElementById('fa-cron').textContent = data.cron;
+        var monitor = data.monitor || {stale:true,hours:36,last:null}, lastRun = monitor.last;
+        var status = document.getElementById('fa-monitor');
+        status.textContent = lastRun ? 'Последний запуск cron: '+date(lastRun.started_at)+' · '+(lastRun.status==='running'?'Выполняется':lastRun.status==='ok'?'Успешно':'Ошибка')+' · '+(lastRun.message||'') : 'Cron ещё не запускался. Ручное скачивание не считается запуском cron.';
+        if(monitor.stale) status.textContent += ' · Внимание: нет запуска за последние '+monitor.hours+' ч.';
+        status.className = monitor.stale || lastRun && lastRun.status==='error' ? 'fa-warning' : 'fa-ok';
+        var journal=document.getElementById('fa-events');journal.textContent='';
+        (data.events||[]).forEach(function(e){
+          var tr=document.createElement('tr');cell(tr,date(e.started_at));cell(tr,e.source_name||'Все источники');
+          cell(tr,({cron:'Cron',daily:'По расписанию',manual:'Вручную'})[e.kind]||e.kind);
+          cell(tr,({ok:'Успешно',error:'Ошибка',running:'Выполняется',skipped:'Пропущено'})[e.status]||e.status,e.status==='error'?'fa-error':'');
+          cell(tr,e.duration_ms===null?'—':(Number(e.duration_ms)/1000).toFixed(2)+' с');
+          cell(tr,e.size_bytes===null?'—':(Number(e.size_bytes)/1024).toFixed(1)+' КБ');cell(tr,e.offers_count);
+          cell(tr,e.warning||e.message||'—',e.warning?'fa-warning':'');journal.appendChild(tr);
+        });
+        if(!(data.events||[]).length){var empty=document.createElement('tr');cell(empty,'Запусков пока нет').colSpan=8;journal.appendChild(empty);}
+
         root.appendChild(detail); expanded = null;
         var tbody = document.getElementById('fa-sources'); tbody.textContent = '';
         sources.forEach(function (s) {
           var row = document.createElement('tr'), last = s.latest || {};
           cell(row, s.name); cell(row, date(last.generation_date)); cell(row, last.offers_count); cell(row, date(s.last_success));
-          cell(row, s.last_error || (!s.enabled || s.enabled === '0' ? 'Отключено' : s.last_success ? 'Успешно' : 'Ещё не скачивалось'), s.last_error ? 'fa-error' : 'fa-ok');
+          cell(row, s.last_error || s.warning || (!s.enabled || s.enabled === '0' ? 'Отключено' : s.last_success ? 'Успешно' : 'Ещё не скачивалось'), s.last_error ? 'fa-error' : s.warning ? 'fa-warning' : 'fa-ok');
           row.setAttribute('data-source-id',s.id);
           var td=cell(row,''), actions=document.createElement('div');actions.className='fa-actions';td.appendChild(actions);
-          actions.appendChild(icon('Настройки и последние 5 копий','⚙',function(){if(!busy){if(current===Number(s.id)&&!detail.hidden)closeDetail();else open(s);}}));
+          actions.appendChild(icon('Настройки и последние 3 копии','⚙',function(){if(!busy){if(current===Number(s.id)&&!detail.hidden)closeDetail();else open(s);}}));
           actions.appendChild(icon('Принудительно скачать новую копию','↻',function(){refresh(s.id);}));
           if(s.latest){var a=document.createElement('a');a.href=s.latest.url;a.textContent='↓';a.className='fa-icon';a.title='Скачать последнюю копию';a.setAttribute('aria-label',a.title);a.target='_blank';a.rel='noopener';actions.appendChild(a);}
           actions.appendChild(icon('Копировать постоянную ссылку','⧉',function(){copy(s.latest_url);}));

@@ -64,9 +64,9 @@ $temp = sys_get_temp_dir() . '/archivefile-install-' . bin2hex(random_bytes(6)) 
 mkdir($temp . 'core', 0750, true); mkdir($temp . 'assets', 0750, true);
 define('MODX_CORE_PATH', $temp . 'core/'); define('MODX_ASSETS_PATH', $temp . 'assets/'); define('MODX_BASE_PATH', $temp); define('MODX_ASSETS_URL', '/assets/');
 file_put_contents($temp . 'config.core.php', '<?php // test bootstrap');
-$stage = dirname(__DIR__) . '/dist/archivefile-1.2.2-pl/';
+$stage = dirname(__DIR__) . '/dist/archivefile-1.3.0-pl/';
 $manifest = include $stage . 'manifest.php';
-$transport = (object)array('xpdo' => new modX(), 'path' => dirname($stage) . '/', 'signature' => 'archivefile-1.2.2-pl');
+$transport = (object)array('xpdo' => new modX(), 'path' => dirname($stage) . '/', 'signature' => 'archivefile-1.3.0-pl');
 $vehicle = new xPDOScriptVehicle();
 $vehicle->payload = include $stage . $manifest['manifest-vehicles'][0]['filename'];
 try {

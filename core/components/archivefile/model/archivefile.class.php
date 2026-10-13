@@ -29,7 +29,7 @@ class ArchiveFile
     }
     public function table($name)
     {
-        if (!in_array($name, array('sources', 'copies'), true)) { throw new InvalidArgumentException('Invalid table'); }
+        if (!in_array($name, array('sources', 'copies', 'events'), true)) { throw new InvalidArgumentException('Invalid table'); }
         return '`' . $this->prefix . 'archivefile_' . $name . '`';
     }
     public function install()
@@ -47,6 +47,13 @@ class ArchiveFile
             generation_date VARCHAR(190) DEFAULT NULL, offers_count INT UNSIGNED DEFAULT NULL,
             size_bytes BIGINT UNSIGNED NOT NULL, sha256 CHAR(64) NOT NULL,
             INDEX source_copy (source_id,id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $this->query('CREATE TABLE IF NOT EXISTS ' . $this->table('events') . ' (
+            id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, source_id INT UNSIGNED DEFAULT NULL,
+            source_name VARCHAR(190) DEFAULT NULL, kind VARCHAR(10) NOT NULL,
+            status VARCHAR(12) NOT NULL, started_at VARCHAR(35) NOT NULL, finished_at VARCHAR(35) DEFAULT NULL,
+            duration_ms INT UNSIGNED DEFAULT NULL, size_bytes BIGINT UNSIGNED DEFAULT NULL,
+            offers_count INT UNSIGNED DEFAULT NULL, message TEXT DEFAULT NULL, warning TEXT DEFAULT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
         if (!is_dir($this->storage) && !mkdir($this->storage, 0750, true)) { throw new RuntimeException('Не удалось создать папку архива'); }
         if (!is_writable($this->storage)) { throw new RuntimeException('Папка архива недоступна для записи'); }
@@ -67,15 +74,53 @@ class ArchiveFile
         foreach ($rows as &$r) {
             $copies = $this->copies($r['id']);
             $r['latest'] = isset($copies[0]) ? $copies[0] : null;
+            $event = $this->query('SELECT warning FROM ' . $this->table('events') . ' WHERE source_id=? AND status=? ORDER BY id DESC LIMIT 1', array($r['id'],'ok'))->fetch(PDO::FETCH_ASSOC);
+            $r['warning'] = $event ? $event['warning'] : null;
             $r['latest_url'] = $this->publicUrl($r['id']);
         }
         return $rows;
     }
     public function copies($sourceId)
     {
-        $rows = $this->query('SELECT * FROM ' . $this->table('copies') . ' WHERE source_id=? ORDER BY id DESC LIMIT 5', array((int)$sourceId))->fetchAll(PDO::FETCH_ASSOC);
+        $rows = $this->query('SELECT * FROM ' . $this->table('copies') . ' WHERE source_id=? ORDER BY id DESC', array((int)$sourceId))->fetchAll(PDO::FETCH_ASSOC);
+        $rows = array_slice(array_values(array_filter($rows, array($this,'validCopy'))),0,3);
         foreach ($rows as &$r) { $r['url'] = $this->publicUrl($sourceId, $r['id']); }
         return $rows;
+    }
+    private function validCopy(array $row)
+    {
+        $path = $this->storage . basename($row['filename']);
+        return is_file($path) && filesize($path) > 0 && filesize($path) === (int)$row['size_bytes'] && hash_equals($row['sha256'],hash_file('sha256',$path))
+            && (strtolower(pathinfo($row['filename'], PATHINFO_EXTENSION)) !== 'xml' || (int)$row['offers_count'] > 0);
+    }
+    public function events()
+    {
+        return $this->query('SELECT * FROM ' . $this->table('events') . ' ORDER BY id DESC LIMIT 100')->fetchAll(PDO::FETCH_ASSOC);
+    }
+    public function beginEvent($kind, $source = null)
+    {
+        $this->query('INSERT INTO ' . $this->table('events') . ' (source_id,source_name,kind,status,started_at) VALUES (?,?,?,?,?)',
+            array($source ? $source['id'] : null, $source ? $source['name'] : null, $kind, 'running', $this->now()));
+        return (int)$this->db->lastInsertId();
+    }
+    public function finishEvent($id, $status, $start, $message = null, $size = null, $count = null, $warning = null)
+    {
+        $this->query('UPDATE ' . $this->table('events') . ' SET status=?,finished_at=?,duration_ms=?,size_bytes=?,offers_count=?,message=?,warning=? WHERE id=?',
+            array($status,$this->now(),min(4294967295,(int)round((microtime(true)-$start)*1000)),$size,$count,$message,$warning,$id));
+        $old = $this->query('SELECT id FROM ' . $this->table('events') . ' ORDER BY id DESC LIMIT 1 OFFSET 199')->fetchColumn();
+        if ($old) $this->query('DELETE FROM ' . $this->table('events') . ' WHERE id<? AND status<>? AND kind<>?', array($old,'running','cron'));
+    }
+    public function cronStatus()
+    {
+        $row = $this->query('SELECT * FROM ' . $this->table('events') . ' WHERE kind=? ORDER BY id DESC LIMIT 1', array('cron'))->fetch(PDO::FETCH_ASSOC);
+        $hours = max(1,(int)$this->modx->getOption('archivefile.cron_stale_hours',null,36));
+        return array('last' => $row ?: null, 'stale' => !$row || time()-strtotime($row['started_at']) > $hours*3600, 'hours' => $hours);
+    }
+    public function cronLock()
+    {
+        $handle = fopen($this->storage . 'cron.lock','c');
+        if (!$handle || !flock($handle,LOCK_EX|LOCK_NB)) { if ($handle) fclose($handle); return false; }
+        return $handle;
     }
     public function publicUrl($sourceId, $copyId = null)
     {
@@ -282,15 +327,25 @@ class ArchiveFile
     public function fetch($id, $daily = false)
     {
         $id = (int)$id;
-        $lock = $this->lock($id); $temp = null; $final = null; $committed = false; $publicBackup = null; $published = false; $publicTarget = null;
+        $lock = $this->lock($id); $temp = null; $final = null; $committed = false; $publicBackup = null; $published = false; $publicTarget = null; $event = null; $start = microtime(true); $status = 'error'; $message = null; $size = null; $meta = array('offers_count'=>null); $warning = null;
         try {
             $source = $this->source($id);
+            $event = $this->beginEvent($daily ? 'daily' : 'manual', $source);
             $today = substr($this->now(), 0, 10);
-            if ($daily && (!$source['enabled'] || $source['last_daily_date'] === $today)) { return array('skipped' => true); }
+            if ($daily && (!$source['enabled'] || $source['last_daily_date'] === $today)) { $status = 'skipped'; return array('skipped' => true); }
             $temp = tempnam($this->storage, 'tmp-');
             if ($temp === false) { throw new RuntimeException('Нет места для временного файла'); }
             $this->download($source['url'], $temp);
+            clearstatcache(true,$temp); $size = filesize($temp);
             $meta = $source['format'] === 'xml' ? self::xmlMetadata($temp) : array('generation_date' => null, 'offers_count' => null);
+            if (!filesize($temp)) { throw new RuntimeException('Получен пустой файл'); }
+            if ($source['format'] === 'xml' && $meta['offers_count'] < 1) { throw new RuntimeException('XML без предложений offer internal-id: архив и lastfile сохранены'); }
+            $previous = $this->copies($id);
+            $before = $previous ? (int)$previous[0]['offers_count'] : 0;
+            $threshold = max(1,min(100,(int)$this->modx->getOption('archivefile.drop_warning_percent',null,30)));
+            if ($source['format'] === 'xml' && $before > 0 && $meta['offers_count'] < $before && ($before-$meta['offers_count'])*100/$before >= $threshold) {
+                $warning = 'Количество предложений снизилось: ' . $before . ' → ' . $meta['offers_count'] . ' (на ' . round(($before-$meta['offers_count'])*100/$before) . '%)';
+            }
             $head = file_get_contents($temp, false, null, 0, 512);
             if (preg_match('~^\s*(?:<!DOCTYPE\s+html|<html\b)~i', $head)) { throw new RuntimeException('Вместо файла получена HTML-страница'); }
             $filename = 'source-' . $id . '-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(8)) . '.' . $source['format'];
@@ -309,8 +364,10 @@ class ArchiveFile
             $newId = (int)$this->db->lastInsertId();
             $this->query('UPDATE ' . $this->table('sources') . ' SET last_success=?,last_error=NULL' . ($daily ? ',last_daily_date=?' : '') . ' WHERE id=?',
                 $daily ? array($now, $today, $id) : array($now, $id));
-            $all = $this->query('SELECT id,filename FROM ' . $this->table('copies') . ' WHERE source_id=? ORDER BY id DESC', array($id))->fetchAll(PDO::FETCH_ASSOC);
-            $old = array_slice($all, 5);
+            $all = $this->query('SELECT * FROM ' . $this->table('copies') . ' WHERE source_id=? ORDER BY id DESC', array($id))->fetchAll(PDO::FETCH_ASSOC);
+            $valid = array_values(array_filter($all, array($this,'validCopy')));
+            $keep = array_column(array_slice($valid,0,3),'filename');
+            $old = array_values(array_filter($all,function($copy) use($keep){return !in_array($copy['filename'],$keep,true);}));
             foreach ($old as $copy) { $this->query('DELETE FROM ' . $this->table('copies') . ' WHERE id=?', array($copy['id'])); }
             $this->publish($id, $source['format'], $final); $published = true;
             $this->db->commit(); $committed = true;
@@ -319,12 +376,13 @@ class ArchiveFile
                 if (is_file($path) && !unlink($path)) { $this->modx->log(modX::LOG_LEVEL_ERROR, 'ArchiveFile: cannot remove expired copy ' . $copy['id']); }
             }
             // Retry cleanup of orphaned files from earlier interrupted runs.
-            $keep = array_column(array_slice($all, 0, 5), 'filename');
+            $status = 'ok';
             foreach (glob($this->storage . 'source-' . $id . '-*.*') as $path) {
                 if (!in_array(basename($path), $keep, true) && is_file($path)) { @unlink($path); }
             }
             return array('id' => $newId, 'generation_date' => $meta['generation_date'], 'offers_count' => $meta['offers_count']);
         } catch (Throwable $e) {
+            $message = $e->getMessage();
             if ($this->db->inTransaction()) { $this->db->rollBack(); }
             if ($published && !$committed) {
                 if ($publicBackup) { $this->publish($id, $source['format'], $publicBackup); }
@@ -337,6 +395,10 @@ class ArchiveFile
             if ($publicBackup && is_file($publicBackup)) { @unlink($publicBackup); }
             if ($temp && is_file($temp)) { @unlink($temp); }
             $this->unlock($lock);
+            if ($event) {
+                try { $this->finishEvent($event,$status,$start,$message,$size,$meta['offers_count'],$warning); }
+                catch (Throwable $logError) { $this->modx->log(1,'ArchiveFile journal: '.$logError->getMessage()); }
+            }
         }
     }
     public function file($sourceId, $copyId = null)
