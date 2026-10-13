@@ -1,7 +1,7 @@
 (function () {
   'use strict';
   function start() {
-    var root = document.getElementById('archivefile');
+    var root = document.getElementById('archivefile-app');
     if (!root) return;
     var config = window.ArchiveFileConfig, sources = [], current = 0, busy = false;
     var detail = document.getElementById('fa-detail'), expanded = null;

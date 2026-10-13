@@ -6,7 +6,7 @@ import shutil
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SIGNATURE = 'archivefile-1.2.0-pl'
+SIGNATURE = 'archivefile-1.2.1-pl'
 DIST = ROOT / 'dist'
 STAGE = DIST / SIGNATURE
 
@@ -54,10 +54,10 @@ def build():
     manifest = {
         'manifest-version': '1.1',
         'manifest-attributes': {
-            'package_name': 'Archive File', 'package_version': '1.2.0',
+            'package_name': 'Archive File', 'package_version': '1.2.1',
             'readme': (ROOT / 'README.md').read_text(),
             'license': (ROOT / 'LICENSE.txt').read_text(),
-            'changelog': '1.2.0-pl: Working 1.1.4 controller and loader retained; inline settings and history, icons, source deletion, forced download, vertical alignment and per-source lastfile static URLs. No source removal on upgrade.'
+            'changelog': '1.2.1-pl: Working 1.1.4 controller and loader retained; inline settings and history, icons, source deletion, forced download, vertical alignment and per-source lastfile static URLs. No source removal on upgrade.'
         },
         'manifest-vehicles': [{
             'vehicle_package': 'transport', 'vehicle_class': 'xPDOScriptVehicle',
