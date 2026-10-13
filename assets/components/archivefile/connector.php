@@ -17,7 +17,7 @@ try {
     $action = isset($_POST['action']) ? $_POST['action'] : '';
     switch ($action) {
         case 'list':
-            $data = array('sources' => $service->sources(), 'cron' => 'php ' . escapeshellarg(MODX_CORE_PATH . 'components/archivefile/cron.php'));
+            $data = array('sources' => $service->sources(), 'cron' => escapeshellarg($modx->getOption('archivefile.cron_php_path', null, '/usr/bin/php7.4')) . ' ' . escapeshellarg(MODX_CORE_PATH . 'components/archivefile/cron.php'));
             break;
         case 'copies': $data = $service->copies(isset($_POST['id']) ? $_POST['id'] : 0); break;
         case 'save': $data = array('id' => $service->save($_POST)); break;

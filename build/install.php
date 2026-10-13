@@ -37,7 +37,7 @@ try {
     $service = new ArchiveFile($modx);
     $service->install();
     $service->migratePublic();
-    foreach (array('archivefile.max_size_mb' => '50', 'archivefile.storage_path' => $core . 'storage/', 'archivefile.installed' => '1') as $key => $value) {
+    foreach (array('archivefile.cron_php_path' => '/usr/bin/php7.4', 'archivefile.max_size_mb' => '50', 'archivefile.storage_path' => $core . 'storage/', 'archivefile.installed' => '1') as $key => $value) {
         $s = $modx->getObject('modSystemSetting', $key);
         if (!$s) {
             $s = $modx->newObject('modSystemSetting');
