@@ -6,12 +6,21 @@
     var config = window.ArchiveFileConfig, sources = [], current = 0, busy = false;
     var detail = document.getElementById('fa-detail'), expanded = null;
     var form = document.getElementById('fa-form');
+    var baseline = '';
+    function values() {
+      var data = {};
+      Array.prototype.forEach.call(form.elements,function(el){if(el.name)data[el.name]=el.type==='checkbox'?el.checked:el.value;});
+      return data;
+    }
+    function dirty() {return !detail.hidden && baseline !== JSON.stringify(values());}
+    function canLeave() {return !dirty() || window.confirm('Есть несохранённые настройки. Закрыть без сохранения?');}
+    window.addEventListener('beforeunload',function(e){if(dirty()){e.preventDefault();e.returnValue='';}});
     var message = document.getElementById('fa-message');
     function notify(text, error) { message.textContent = text; message.className = error ? 'fa-error' : 'fa-ok'; }
     function api(action, data) {
       var body = new URLSearchParams(data || {}); body.set('action', action); body.set('csrf', config.csrf);
       return fetch(config.connector, {method: 'POST', credentials: 'same-origin', body: body}).then(function (r) {
-        return r.json();
+        return r.json().catch(function(){throw new Error('Сервер вернул некорректный ответ (HTTP '+r.status+'). Проверьте журнал MODX и PHP.');});
       }).then(function (r) { if (!r.success) throw new Error(r.message || 'Ошибка сервера'); return r.data; });
     }
     function cell(row, value, cls) { var td = document.createElement('td'); td.textContent = value === null || value === undefined ? '—' : value; if (cls) td.className = cls; row.appendChild(td); return td; }
@@ -65,6 +74,7 @@
         actions.appendChild(icon('Копировать ссылку на часть','⧉',function(){copy(p.url);}));tbody.appendChild(tr);});
     }
     function load() {
+      var draft = !detail.hidden ? values() : null, previousBaseline = baseline;
       return api('list').then(function (data) {
         sources = data.sources;
         document.getElementById('fa-cron').textContent = data.cron;
@@ -90,11 +100,11 @@
         var tbody = document.getElementById('fa-sources'); tbody.textContent = '';
         sources.forEach(function (s) {
           var row = document.createElement('tr'), last = s.latest || {};
-          cell(row, s.name,'fa-name'); cell(row, date(last.generation_date),'fa-feed-date'); cell(row, last.offers_count); cell(row, date(s.last_success));
+          cell(row, s.name,'fa-name'); cell(row, date(!s.xml_options||s.xml_options.date_element ? last.generation_date : null),'fa-feed-date'); cell(row, last.offers_count); cell(row, date(s.last_success));
           cell(row, s.last_error || s.warning || (!s.enabled || s.enabled === '0' ? 'Отключено' : s.last_success ? 'Успешно' : 'Ещё не скачивалось'), s.last_error ? 'fa-error' : s.warning ? 'fa-warning' : 'fa-ok');
           row.setAttribute('data-source-id',s.id);
           var td=cell(row,''), actions=document.createElement('div');actions.className='fa-actions';td.appendChild(actions);
-          actions.appendChild(icon('Настройки и последние 3 копии','⚙',function(){if(!busy){if(current===Number(s.id)&&!detail.hidden)closeDetail();else open(s);}}));
+          actions.appendChild(icon('Настройки и последние 3 копии','⚙',function(){if(!busy&&canLeave()){if(current===Number(s.id)&&!detail.hidden)closeDetail();else open(s);}}));
           actions.appendChild(icon('Принудительно скачать новую копию','↻',function(){refresh(s.id);}));
           if(s.latest){var a=document.createElement('a');a.href=s.latest.url;decorateIcon(a,'Скачать последнюю копию','↓');a.target='_blank';a.rel='noopener';actions.appendChild(a);}
           actions.appendChild(icon('Копировать постоянную ссылку','⧉',function(){copy(s.latest_url);}));
@@ -105,6 +115,12 @@
         document.getElementById('fa-sources').parentNode.querySelectorAll('.fa-feed-date').forEach(function(el){el.hidden=!showDate;});
         markSelected(current);
         if(current){var selected=sources.find(function(s){return Number(s.id)===current;});if(selected)open(selected);else closeDetail();}
+        if(draft && Number(draft.id)===current) {
+          if(!current) open(null);
+          Object.keys(draft).forEach(function(k){var el=form.elements[k];if(el){if(el.type==='checkbox')el.checked=draft[k];else el.value=draft[k];}});
+          baseline=previousBaseline;
+          document.getElementById('fa-xml-options').hidden=form.elements.format.value!=='xml';
+        }
         if (!sources.length) { var tr = document.createElement('tr'); cell(tr, 'Добавьте первую ссылку').colSpan = 6; tbody.appendChild(tr); }
       });
     }
@@ -151,11 +167,12 @@
       var o=s&&s.xml_options||{offer_element:'offer',offer_attribute:'internal-id',date_element:'generation-date',container_path:'',split_enabled:0,split_limit:1000};
       ['offer_element','offer_attribute','date_element','container_path','split_limit'].forEach(function(k){form.elements[k].value=o[k];});form.elements.split_enabled.checked=!!Number(o.split_enabled);
       document.getElementById('fa-xml-options').hidden=form.elements.format.value!=='xml';document.getElementById('fa-preview-result').textContent='';showParts(s);
+      baseline=JSON.stringify(values());
       form.elements.name.focus();
     }
     document.getElementById('fa-copy-cron').onclick=function(){var command=document.getElementById('fa-cron');if(command.getAttribute('data-ready')==='1')copy(command.textContent);};
-    document.getElementById('fa-add').onclick = function () { open(null); };
-    document.getElementById('fa-close').onclick = function () { closeDetail(); };
+    document.getElementById('fa-add').onclick = function () { if(canLeave())open(null); };
+    document.getElementById('fa-close').onclick = function () { if(canLeave())closeDetail(); };
     document.getElementById('fa-copy-latest').onclick = function () { copy(document.getElementById('fa-latest-url').value); };
     form.onsubmit = function (e) {
       e.preventDefault(); if (busy) return; setBusy(true);

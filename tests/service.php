@@ -8,32 +8,7 @@ function fails($fn, $label) {
     try { $fn(); } catch (Throwable $e) { echo 'PASS ' . $label . ': ' . $e->getMessage() . PHP_EOL; return; }
     throw new RuntimeException('FAIL expected exception ' . $label);
 }
-class FakeModx {
-    public $db; public $pdo; public $storage;
-    public function __construct($path) {
-        $this->storage = $path;
-        $this->db = new PDO('sqlite::memory:');
-        $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        $this->db->exec('CREATE TABLE test_archivefile_sources (id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,url TEXT,format TEXT,enabled INTEGER,last_success TEXT,last_daily_date TEXT,last_error TEXT,created_at TEXT)');
-        $this->db->exec('CREATE TABLE test_archivefile_options (id INTEGER PRIMARY KEY,settings TEXT)');
-        $this->db->exec('CREATE TABLE test_archivefile_events (id INTEGER PRIMARY KEY AUTOINCREMENT,source_id INTEGER,source_name TEXT,kind TEXT,status TEXT,started_at TEXT,finished_at TEXT,duration_ms INTEGER,size_bytes INTEGER,offers_count INTEGER,message TEXT,warning TEXT)');
-        $this->db->exec('CREATE TABLE test_archivefile_copies (id INTEGER PRIMARY KEY AUTOINCREMENT,source_id INTEGER,filename TEXT,downloaded_at TEXT,generation_date TEXT,offers_count INTEGER,size_bytes INTEGER,sha256 TEXT)');
-    }
-    public function connect() { $this->pdo = $this->db; return true; }
-    public function getConnection() { return (object)array('pdo' => $this->db); }
-    public function getOption($key, $options = null, $default = null) {
-        return array('table_prefix' => 'test_', 'archivefile.storage_path' => $this->storage, 'site_url' => 'https://example.org/', 'assets_url' => '/assets/')[$key] ?? $default;
-    }
-    public function log($level, $message) { echo 'LOG ' . $message . PHP_EOL; }
-}
-class FixtureService extends ArchiveFile {
-    public $xml = '<r xmlns="urn:test"><generation-date>2026-10-13T02:45:00+03:00</generation-date><offer internal-id="1"/><offer internal-id="1"/><offer/><offer internal-id=""/></r>';
-    public $networkError = false;
-    protected function download($url, $file) {
-        if ($this->networkError) { throw new RuntimeException('Simulated HTTP failure'); }
-        file_put_contents($file, $this->xml);
-    }
-}
+require __DIR__.'/fixtures/service.php';
 $storage = sys_get_temp_dir() . '/archivefile-test-' . bin2hex(random_bytes(6)) . '/';
 mkdir($storage);
 define('MODX_CORE_PATH', $storage);
@@ -152,6 +127,48 @@ try {
     fails(function(){ArchiveFileXmlTools::options(array('split_limit'=>0));},'zero split limit blocked');
     $ambiguous=$storage.'ambiguous.xml';file_put_contents($ambiguous,'<r><a><item/></a><b><item/></b></r>');
     fails(function() use($ambiguous){ArchiveFileXmlTools::parse($ambiguous,array('offer_element'=>'item','offer_attribute'=>'','split_enabled'=>1));},'ambiguous containers rejected');
+    // Failure after public bytes changed must restore full file, parts, rows and release lock.
+    $service->xml='<catalog><items><item/><item/></items></catalog>';
+    $snapshot=file_get_contents($target); $savedIds=array_column($service->copies($c),'id');
+    $service->failPublish=true;
+    fails(function() use($service,$c){$service->fetch($c);},'injected failure after publish');
+    check(file_get_contents($target)===$snapshot && array_column($service->copies($c),'id')===$savedIds,'after-publish failure restores old full file and rows');
+    check(!is_file($storage.'source-'.$c.'.publication.json'),'recovery journal cleared after successful rollback');
+    $service->failCopyInsert=true; $service->failCleanup=true;
+    try { $service->fetch($c); throw new RuntimeException('Expected failure'); }
+    catch (Throwable $e) { check($e->getMessage()==='Injected DB insert failure','cleanup failure preserves original exception'); }
+    check(is_file($storage.'source-'.$c.'.publication.json'),'failed recovery keeps journal and backup for retry');
+    $service->failCopyInsert=false; $service->failCleanup=false;
+    $service->save(array_merge($service->source($c),$service->xmlOptions($c)));
+    check(!is_file($storage.'source-'.$c.'.publication.json') && file_get_contents($target)===$snapshot,'retry recovers after cleanup failure and releases source lock');
+    $modx->db->commitThenFail=true;
+    fails(function() use($service,$c){$service->fetch($c);},'lost DB commit acknowledgement');
+    check(count($service->copies($c))===3 && file_get_contents($target)===$service->xml,'actual commit retained despite lost acknowledgement');
+    check(!is_file($storage.'source-'.$c.'.publication.json'),'committed recovery completes');
+    $corrupt=$service->copies($c)[0]; $corruptPath=$storage.$corrupt['filename']; $corruptBytes=file_get_contents($corruptPath);
+    file_put_contents($corruptPath,str_repeat('x',strlen($corruptBytes)));
+    fails(function() use($service,$c,$corrupt){$service->file($c,$corrupt['id']);},'direct historical download rejects same-size corruption');
+    file_put_contents($corruptPath,$corruptBytes);
+    $oldCount=count($service->sources()); $service->failOptions=true;
+    fails(function() use($service){$service->save(array('name'=>'rollback','url'=>'https://example.org/new.xml'));},'new source options failure');
+    $service->failOptions=false;
+    check(!$modx->db->inTransaction() && count($service->sources())===$oldCount,'new source failure rolls back transaction and row');
+    foreach (array(array('name'=>array()),array('url'=>array()),array('id'=>'1oops')) as $bad) {
+        fails(function() use($service,$bad){$service->save(array_merge(array('name'=>'valid','url'=>'https://example.org/f.xml'),$bad));},'malformed source input rejected');
+    }
+    fails(function(){ArchiveFileXmlTools::options(array('split_limit'=>'1000x'));},'noninteger split limit rejected');
+    fails(function(){ArchiveFileXmlTools::options(array('offer_element'=>array()));},'array XML setting rejected');
+    $service->failDeletePath=MODX_ASSETS_PATH.'archivefile/'.$c;
+    fails(function() use($service,$c){$service->delete($c);},'file deletion failure');
+    check((int)$service->source($c)['id']===$c,'failed deletion retains row for retry');
+    $service->failDeletePath=null;
+    // Journal retention: cron runs are bounded; the latest source warning survives pruning.
+    $warningBefore=$service->sources()[0]['warning'];
+    for($i=0;$i<215;$i++){$e=$service->beginEvent('cron');$service->finishEvent($e,'ok',microtime(true));}
+    check((int)$service->query('SELECT COUNT(*) FROM '.$service->table('events'))->fetchColumn()<=205,'cron journal retention is bounded');
+    check($service->sources()[0]['warning']===$warningBefore,'last successful warning survives pruning');
+    $e=$service->beginEvent('manual',$service->source($c));$service->fetch($c);
+    check($service->query('SELECT status FROM '.$service->table('events').' WHERE id=?',array($e))->fetchColumn()==='error','abandoned source run marked interrupted under lock');
     $service->delete($c);check(!is_dir(MODX_ASSETS_PATH.'archivefile/'.$c.'/parts'),'delete removes parts');
     $service->delete($b);
     fails(function () use ($service,$b) { $service->source($b); }, 'deleted source absent');

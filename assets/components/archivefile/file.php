@@ -4,8 +4,8 @@ require __DIR__ . '/bootstrap.php';
 $modx->initialize('web');
 try {
     if (!$modx->getOption('archivefile.installed', null, false)) { throw new RuntimeException('Component disabled'); }
-    if (!isset($_GET['source']) || !ctype_digit((string)$_GET['source'])
-        || (isset($_GET['copy']) && !ctype_digit((string)$_GET['copy']))) { throw new RuntimeException('Invalid ID'); }
+    if (!isset($_GET['source']) || !is_string($_GET['source']) || !ctype_digit($_GET['source'])
+        || (isset($_GET['copy']) && (!is_string($_GET['copy']) || !ctype_digit($_GET['copy'])))) { throw new RuntimeException('Invalid ID'); }
     $service = new ArchiveFile($modx);
     list($row, $handle) = $service->file((int)$_GET['source'], isset($_GET['copy']) ? (int)$_GET['copy'] : null);
     $ext = pathinfo($row['filename'], PATHINFO_EXTENSION);
