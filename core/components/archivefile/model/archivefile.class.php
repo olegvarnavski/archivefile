@@ -58,7 +58,7 @@ class ArchiveFile
             size_bytes BIGINT UNSIGNED NOT NULL, sha256 CHAR(64) NOT NULL,
             INDEX source_copy (source_id,id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
-        $this->query('CREATE TABLE IF NOT EXISTS ' . $this->table('events', 'options') . ' (
+        $this->query('CREATE TABLE IF NOT EXISTS ' . $this->table('events') . ' (
             id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, source_id INT UNSIGNED DEFAULT NULL,
             source_name VARCHAR(190) DEFAULT NULL, kind VARCHAR(10) NOT NULL,
             status VARCHAR(12) NOT NULL, started_at VARCHAR(35) NOT NULL, finished_at VARCHAR(35) DEFAULT NULL,
@@ -68,6 +68,7 @@ class ArchiveFile
         $this->query('CREATE TABLE IF NOT EXISTS ' . $this->table('options') . ' (
             id INT UNSIGNED NOT NULL PRIMARY KEY, settings TEXT NOT NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+        $this->installIndexes();
         if (!is_dir($this->storage) && !mkdir($this->storage, 0750, true)) { throw new RuntimeException('Не удалось создать папку архива'); }
         if (!is_writable($this->storage)) { throw new RuntimeException('Папка архива недоступна для записи'); }
         $this->ensurePublic();
@@ -75,31 +76,72 @@ class ArchiveFile
         if (file_put_contents($this->storage . '.htaccess', $deny) === false) { throw new RuntimeException('Не удалось защитить папку архива'); }
         file_put_contents($this->storage . 'index.html', '');
     }
+    /** Additive, idempotent index migration; no data or existing fields are replaced. */
+    private function installIndexes()
+    {
+        if ($this->db->getAttribute(PDO::ATTR_DRIVER_NAME) !== 'mysql') return;
+        $indexes = $this->query('SHOW INDEX FROM '.$this->table('events'))->fetchAll(PDO::FETCH_ASSOC);
+        $names = array_column($indexes,'Key_name');
+        foreach (array('source_status_event'=>'source_id,status,id','kind_event'=>'kind,id','status_event'=>'status,id') as $name=>$columns) {
+            if (!in_array($name,$names,true)) $this->query('CREATE INDEX `'.$name.'` ON '.$this->table('events').' ('.$columns.')');
+        }
+    }
+    public function maintenanceLock()
+    {
+        $locks = array();
+        try {
+            $cron = $this->cronLock();
+            if (!$cron) throw new RuntimeException('Выполняется cron ArchiveFile. Повторите установку позже.');
+            $locks[] = $cron;
+            foreach ($this->sources(false) as $row) $locks[] = $this->lock($row['id']);
+            return $locks;
+        } catch (Throwable $e) { $this->maintenanceUnlock($locks); throw $e; }
+    }
+    public function maintenanceUnlock(array $locks)
+    {
+        foreach (array_reverse($locks) as $lock) $this->unlock($lock);
+    }
     public function source($id)
     {
         $row = $this->query('SELECT * FROM ' . $this->table('sources') . ' WHERE id=?', array((int)$id))->fetch(PDO::FETCH_ASSOC);
         if (!$row) { throw new RuntimeException('Источник не найден'); }
         return $row;
     }
-    public function sources()
+    public function sources($decorate = true)
     {
-        $rows = $this->query('SELECT * FROM ' . $this->table('sources') . ' ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($rows as &$r) {
-            $copies = $this->copies($r['id']);
-            $r['latest'] = isset($copies[0]) ? $copies[0] : null;
-            $event = $this->query('SELECT warning FROM ' . $this->table('events', 'options') . ' WHERE source_id=? AND status=? ORDER BY id DESC LIMIT 1', array($r['id'],'ok'))->fetch(PDO::FETCH_ASSOC);
-            $r['warning'] = $event ? $event['warning'] : null;
-            $r['xml_options'] = $this->xmlOptions($r['id']);
-            $r['parts'] = $this->parts($r['id']);
-            $r['latest_url'] = $this->publicUrl($r['id']);
+        $rows = $this->query('SELECT * FROM '.$this->table('sources').' ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+        if (!$decorate || !$rows) return $rows;
+        $latest = array(); $options = array(); $warnings = array();
+        $statement = $this->query('SELECT * FROM '.$this->table('copies').' ORDER BY source_id,id');
+        while ($copy = $statement->fetch(PDO::FETCH_ASSOC)) {
+            $id = $copy['source_id'];
+            if ($this->validCopy($copy,false)) {
+                $copy['url'] = $this->publicUrl($id,$copy['id']); $latest[$id] = $copy;
+            }
+        }
+        $statement->closeCursor();
+        foreach ($this->query('SELECT * FROM '.$this->table('options'))->fetchAll(PDO::FETCH_ASSOC) as $o) $options[$o['id']] = ArchiveFileXmlTools::options((array)json_decode($o['settings'],true));
+        $sql = 'SELECT e.source_id,e.warning FROM '.$this->table('events').' e JOIN (SELECT source_id,MAX(id) id FROM '.$this->table('events').' WHERE status=? GROUP BY source_id) x ON e.id=x.id';
+        foreach ($this->query($sql,array('ok'))->fetchAll(PDO::FETCH_ASSOC) as $event) $warnings[$event['source_id']] = $event['warning'];
+        foreach ($rows as &$row) {
+            $id = $row['id']; $row['latest'] = isset($latest[$id]) ? $latest[$id] : null;
+            $row['warning'] = isset($warnings[$id]) ? $warnings[$id] : null;
+            $row['xml_options'] = isset($options[$id]) ? $options[$id] : ArchiveFileXmlTools::options(array());
+            $row['parts'] = $this->parts($id,$row['format']); $row['latest_url'] = $this->publicUrl($id,null,$row['format']);
         }
         return $rows;
     }
-    public function copies($sourceId)
+    public function copies($sourceId, $verify = true)
     {
-        $rows = $this->query('SELECT * FROM ' . $this->table('copies') . ' WHERE source_id=? ORDER BY id DESC', array((int)$sourceId))->fetchAll(PDO::FETCH_ASSOC);
-        $rows = array_slice(array_values(array_filter($rows, array($this,'validCopy'))),0,3);
-        foreach ($rows as &$r) { $r['url'] = $this->publicUrl($sourceId, $r['id']); }
+        $sourceId = self::id($sourceId);
+        $statement = $this->query('SELECT * FROM '.$this->table('copies').' WHERE source_id=? ORDER BY id DESC', array($sourceId));
+        $rows = array();
+        while ($row = $statement->fetch(PDO::FETCH_ASSOC)) {
+            if (!$this->validCopy($row,$verify)) continue;
+            $row['url'] = $this->publicUrl($sourceId,$row['id']); $rows[] = $row;
+            if (count($rows) === 3) break;
+        }
+        $statement->closeCursor();
         return $rows;
     }
     public function xmlOptions($id)
@@ -107,17 +149,18 @@ class ArchiveFile
         $json=$this->query('SELECT settings FROM '.$this->table('options').' WHERE id=?',array((int)$id))->fetchColumn();
         return ArchiveFileXmlTools::options($json ? (array)json_decode($json,true) : array());
     }
-    public function parts($id)
+    public function parts($id, $format = null)
     {
         $dir=$this->public.(int)$id.'/parts/';$manifest=$dir.'manifest.json';
         if(!is_file($manifest))return array();
         $rows=json_decode(file_get_contents($manifest),true);if(!is_array($rows))return array();
-        $url=dirname($this->publicUrl($id)).'/parts/';
+        $url=dirname($this->publicUrl($id,null,$format)).'/parts/';
         foreach($rows as &$row)$row['url']=$url.basename($row['filename']);
         return $rows;
     }
     public function preview(array $data)
     {
+        $this->validateInput($data);
         $options=ArchiveFileXmlTools::options($data);$url=trim(isset($data['url'])?$data['url']:'');$this->urlParts($url);
         $temp=tempnam($this->storage,'preview-');if(!$temp)throw new RuntimeException('Не удалось создать временный файл');
         try {
@@ -127,8 +170,9 @@ class ArchiveFile
                 'valid'=>$result['offers_count']>0);
         } finally {if(is_file($temp))unlink($temp);}
     }
-    private function removeTree($path)
+    protected function removeTree($path)
     {
+        if (is_link($path)) { if (!unlink($path)) throw new RuntimeException('Не удалось удалить ссылку'); return; }
         if(!is_dir($path))return;
         foreach(new DirectoryIterator($path) as $item){if($item->isDot())continue;if($item->isDir())$this->removeTree($item->getPathname());else if(!unlink($item->getPathname()))throw new RuntimeException('Не удалось удалить файл части');}
         if(!rmdir($path))throw new RuntimeException('Не удалось удалить папку частей');
@@ -141,34 +185,45 @@ class ArchiveFile
             if($archiveParts && is_dir($archiveParts))foreach(new DirectoryIterator($archiveParts) as $item){if($item->isDot())continue;if(!$item->isFile()||!copy($item->getPathname(),$stage.'/'.$item->getFilename())||!chmod($stage.'/'.$item->getFilename(),0644))throw new RuntimeException('Не удалось опубликовать части');}
             else if(file_put_contents($stage.'/manifest.json','[]')===false)throw new RuntimeException('Не удалось подготовить список частей');
             return $stage;
-        }catch(Throwable $e){$this->removeTree($stage);throw $e;}
+        }catch(Throwable $e){$this->cleanup(function () use ($stage) { $this->removeTree($stage); });throw $e;}
     }
-    private function validCopy(array $row)
+    private function validCopy(array $row, $verify = true)
     {
         $path = $this->storage . basename($row['filename']);
-        return is_file($path) && filesize($path) > 0 && filesize($path) === (int)$row['size_bytes'] && hash_equals($row['sha256'],hash_file('sha256',$path))
+        return is_file($path) && filesize($path) > 0 && filesize($path) === (int)$row['size_bytes'] && (!$verify || hash_equals($row['sha256'], (string)hash_file('sha256',$path)))
             && (strtolower(pathinfo($row['filename'], PATHINFO_EXTENSION)) !== 'xml' || (int)$row['offers_count'] > 0);
     }
     public function events()
     {
-        return $this->query('SELECT * FROM ' . $this->table('events', 'options') . ' ORDER BY id DESC LIMIT 100')->fetchAll(PDO::FETCH_ASSOC);
+        return $this->query('SELECT * FROM ' . $this->table('events') . ' ORDER BY id DESC LIMIT 100')->fetchAll(PDO::FETCH_ASSOC);
     }
     public function beginEvent($kind, $source = null)
     {
-        $this->query('INSERT INTO ' . $this->table('events', 'options') . ' (source_id,source_name,kind,status,started_at) VALUES (?,?,?,?,?)',
+        $this->query('INSERT INTO ' . $this->table('events') . ' (source_id,source_name,kind,status,started_at) VALUES (?,?,?,?,?)',
             array($source ? $source['id'] : null, $source ? $source['name'] : null, $kind, 'running', $this->now()));
         return (int)$this->db->lastInsertId();
     }
     public function finishEvent($id, $status, $start, $message = null, $size = null, $count = null, $warning = null)
     {
-        $this->query('UPDATE ' . $this->table('events', 'options') . ' SET status=?,finished_at=?,duration_ms=?,size_bytes=?,offers_count=?,message=?,warning=? WHERE id=?',
+        $this->query('UPDATE ' . $this->table('events') . ' SET status=?,finished_at=?,duration_ms=?,size_bytes=?,offers_count=?,message=?,warning=? WHERE id=?',
             array($status,$this->now(),min(4294967295,(int)round((microtime(true)-$start)*1000)),$size,$count,$message,$warning,$id));
-        $old = $this->query('SELECT id FROM ' . $this->table('events', 'options') . ' ORDER BY id DESC LIMIT 1 OFFSET 199')->fetchColumn();
-        if ($old) $this->query('DELETE FROM ' . $this->table('events', 'options') . ' WHERE id<? AND status<>? AND kind<>?', array($old,'running','cron'));
+        $this->pruneEvents();
+    }
+    private function pruneEvents()
+    {
+        $cutoff = $this->query('SELECT id FROM '.$this->table('events').' ORDER BY id DESC LIMIT 1 OFFSET 199')->fetchColumn();
+        if (!$cutoff) return;
+        // Keep the latest successful warning per source and the last cron heartbeat.
+        $keep = $this->query('SELECT MAX(e.id) FROM '.$this->table('events').' e JOIN '.$this->table('sources').' s ON s.id=e.source_id WHERE e.status=? GROUP BY e.source_id', array('ok'))->fetchAll(PDO::FETCH_COLUMN);
+        $cron = $this->query('SELECT MAX(id) FROM '.$this->table('events').' WHERE kind=?', array('cron'))->fetchColumn();
+        if ($cron) $keep[] = $cron;
+        $sql = 'DELETE FROM '.$this->table('events').' WHERE id<? AND status<>?'; $params = array($cutoff,'running');
+        if ($keep) { $sql .= ' AND id NOT IN ('.implode(',',array_fill(0,count($keep),'?')).')'; $params = array_merge($params,$keep); }
+        $this->query($sql,$params);
     }
     public function cronStatus()
     {
-        $row = $this->query('SELECT * FROM ' . $this->table('events', 'options') . ' WHERE kind=? ORDER BY id DESC LIMIT 1', array('cron'))->fetch(PDO::FETCH_ASSOC);
+        $row = $this->query('SELECT * FROM ' . $this->table('events') . ' WHERE kind=? ORDER BY id DESC LIMIT 1', array('cron'))->fetch(PDO::FETCH_ASSOC);
         $hours = max(1,(int)$this->modx->getOption('archivefile.cron_stale_hours',null,36));
         return array('last' => $row ?: null, 'stale' => !$row || time()-strtotime($row['started_at']) > $hours*3600, 'hours' => $hours);
     }
@@ -176,9 +231,12 @@ class ArchiveFile
     {
         $handle = fopen($this->storage . 'cron.lock','c');
         if (!$handle || !flock($handle,LOCK_EX|LOCK_NB)) { if ($handle) fclose($handle); return false; }
+        try {
+            $this->query('UPDATE '.$this->table('events').' SET status=?,finished_at=?,message=? WHERE kind=? AND status=?', array('error',$this->now(),'Предыдущий cron был прерван','cron','running'));
+        } catch (Throwable $e) { $this->unlock($handle); throw $e; }
         return $handle;
     }
-    public function publicUrl($sourceId, $copyId = null)
+    public function publicUrl($sourceId, $copyId = null, $format = null)
     {
         $site = rtrim($this->modx->getOption('site_url'), '/');
         $assets = $this->modx->getOption('assets_url', null, MODX_ASSETS_URL);
@@ -187,7 +245,7 @@ class ArchiveFile
             $p = parse_url($site);
             $base = $p['scheme'] . '://' . $p['host'] . (isset($p['port']) ? ':' . $p['port'] : '') . rtrim($assets, '/');
         } else { $base = $site . '/' . trim($assets, '/'); }
-        if ($copyId === null) { $source = $this->source($sourceId); return $base . '/archivefile/' . (int)$sourceId . '/lastfile.' . $source['format']; }
+        if ($copyId === null) { if ($format === null) $format = $this->source($sourceId)['format']; return $base . '/archivefile/' . (int)$sourceId . '/lastfile.' . $format; }
         return $base . '/components/archivefile/file.php?source=' . (int)$sourceId . ($copyId === null ? '' : '&copy=' . (int)$copyId);
     }
     private function ensurePublic()
@@ -195,9 +253,9 @@ class ArchiveFile
         if (!is_dir($this->public) && !mkdir($this->public, 0755, true)) { throw new RuntimeException('Не удалось создать папку публичных файлов'); }
         if (!is_writable($this->public)) { throw new RuntimeException('Папка публичных файлов недоступна для записи'); }
         file_put_contents($this->public . 'index.html', '');
-        if (file_put_contents($this->public . '.htaccess', "Options -Indexes\n<IfModule mod_headers.c>\nHeader set Cache-Control \"no-cache\"\nHeader set X-Content-Type-Options \"nosniff\"\n</IfModule>\n") === false) { throw new RuntimeException('Не удалось настроить публичную папку'); }
+        if (file_put_contents($this->public . '.htaccess', "Options -Indexes\n<IfModule mod_headers.c>\nHeader set Cache-Control \"no-cache\"\nHeader set X-Content-Type-Options \"nosniff\"\nHeader set Content-Security-Policy \"sandbox; default-src 'none'\"\nHeader set Content-Disposition \"attachment\"\n</IfModule>\n") === false) { throw new RuntimeException('Не удалось настроить публичную папку'); }
     }
-    private function publish($id, $format, $path)
+    protected function publish($id, $format, $path)
     {
         $this->ensurePublic();
         $dir = $this->public . (int)$id . '/';
@@ -210,35 +268,119 @@ class ArchiveFile
         } finally { if (is_file($temp)) { unlink($temp); } }
         foreach (glob($dir . 'lastfile.*') as $old) { if ($old !== $target) { @unlink($old); } }
     }
-    public function migratePublic()
+    /** Installation must never republish or rotate user data. */
+    public function migratePublic() { }
+    public function delete($id)
     {
-        foreach ($this->sources() as $source) {
-            if ($source['latest'] && pathinfo($source['latest']['filename'], PATHINFO_EXTENSION) === $source['format']) {
-                $this->publish($source['id'], $source['format'], $this->storage . basename($source['latest']['filename']));
+        $id = self::id($id); $lock = $this->lock($id);
+        try {
+            $this->source($id);
+            // Retain the row until all bytes are removed, so a failed deletion can be retried.
+            $this->removeTree($this->public.$id);
+            foreach (glob($this->storage.'source-'.$id.'-*.parts') as $path) $this->removeTree($path);
+            foreach (glob($this->storage.'source-'.$id.'-*.*') as $path) {
+                if (is_file($path) && !unlink($path)) throw new RuntimeException('Не удалось удалить файл. Повторите удаление источника.');
+            }
+            $this->db->beginTransaction();
+            $this->query('DELETE FROM '.$this->table('copies').' WHERE source_id=?', array($id));
+            $this->query('DELETE FROM '.$this->table('options').' WHERE id=?', array($id));
+            $this->query('DELETE FROM '.$this->table('sources').' WHERE id=?', array($id));
+            $this->db->commit();
+        } finally {
+            try { if ($this->db->inTransaction()) $this->db->rollBack(); }
+            finally { $this->unlock($lock); }
+        }
+        return array('deleted' => true);
+    }
+    public static function id($value, $allowZero = false)
+    {
+        if ((!is_int($value) && !is_string($value)) || !preg_match('/^[0-9]+$/D', (string)$value)
+            || strlen((string)$value) > 10 || (float)$value > 4294967295 || (!$allowZero && (int)$value < 1)) {
+            throw new InvalidArgumentException('Недопустимый ID');
+        }
+        return (int)$value;
+    }
+    private function validateInput(array $data)
+    {
+        foreach ($data as $key => $value) {
+            if (!is_scalar($value) && $value !== null) throw new InvalidArgumentException('Недопустимое значение: '.$key);
+        }
+    }
+    /** Cleanup cannot hide the original error or prevent unlocking. */
+    private function cleanup(callable $operation)
+    {
+        try { $operation(); return true; }
+        catch (Throwable $e) { $this->modx->log(1, 'ArchiveFile recovery/cleanup: '.$e->getMessage()); return false; }
+    }
+    private function unlinkFile($path)
+    {
+        if ($path && is_file($path) && !unlink($path)) throw new RuntimeException('Не удалось удалить временный файл');
+    }
+    /** Under source lock, the DB commit decides whether to retain or undo a publication. */
+    private function recoverPublication($id)
+    {
+        $journal = $this->storage.'source-'.$id.'.publication.json';
+        if (!is_file($journal)) return;
+        $j = json_decode(file_get_contents($journal), true);
+        if (!is_array($j)) throw new RuntimeException('Повреждён журнал восстановления источника '.$id);
+        foreach (array('filename','backup','parts_backup','parts_stage') as $key) {
+            if (!isset($j[$key]) || !is_string($j[$key]) || basename($j[$key]) !== $j[$key]) throw new RuntimeException('Некорректный журнал восстановления');
+        }
+        if (!preg_match('/^source-'.$id.'-[A-Za-z0-9-]+\.(xml|csv|xlsx|xls|pdf|zip|json|txt)$/D', $j['filename'])
+            || !preg_match('/^tmp-public-'.$id.'-[A-Za-z0-9]+$/D', $j['backup'])
+            || !preg_match('/^\.parts-old-[a-f0-9]+$/D', $j['parts_backup'])
+            || !preg_match('/^\.parts-new-[a-f0-9]+$/D', $j['parts_stage'])) throw new RuntimeException('Некорректные пути восстановления');
+        $dir = $this->public.$id.'/'; $backup = $this->storage.$j['backup'];
+        $partsBackup = $dir.$j['parts_backup']; $stage = $dir.$j['parts_stage'];
+        $committed = $this->query('SELECT id FROM '.$this->table('copies').' WHERE source_id=? AND filename=?', array($id,$j['filename']))->fetchColumn();
+        if (!$committed) {
+            if (is_dir($partsBackup)) {
+                $this->removeTree($dir.'parts');
+                if (!rename($partsBackup,$dir.'parts')) throw new RuntimeException('Не удалось восстановить прежние части');
+            } elseif (empty($j['had_parts']) && !is_dir($stage)) { $this->removeTree($dir.'parts'); }
+            $format = pathinfo($j['filename'], PATHINFO_EXTENSION);
+            if (!empty($j['had_full'])) {
+                if (!is_file($backup)) throw new RuntimeException('Нет резервного файла для восстановления');
+                $this->publish($id,$format,$backup);
+            } else { $this->unlinkFile($dir.'lastfile.'.$format); }
+            $this->unlinkFile($this->storage.$j['filename']);
+            $this->removeTree($this->storage.$j['filename'].'.parts');
+        }
+        $this->removeTree($stage); $this->removeTree($partsBackup);
+        // Remove the journal first: an interruption may leave an inert backup, not a broken journal.
+        if (!unlink($journal)) throw new RuntimeException('Не удалось завершить восстановление');
+        $this->unlinkFile($backup);
+        return (bool)$committed;
+    }
+    private function pruneOrphans($id)
+    {
+        $keep = $this->query('SELECT filename FROM '.$this->table('copies').' WHERE source_id=?',array($id))->fetchAll(PDO::FETCH_COLUMN);
+        foreach (glob($this->storage.'source-'.$id.'-*.*') as $path) {
+            $name = basename($path); $base = substr($name,-6)==='.parts' ? substr($name,0,-6) : $name;
+            if (in_array($base,$keep,true)) continue;
+            if (is_dir($path)) $this->removeTree($path); else $this->unlinkFile($path);
+        }
+        foreach (array('tmp-source-'.$id.'-*','tmp-public-'.$id.'-*') as $pattern) {
+            foreach (glob($this->storage.$pattern) as $path) $this->unlinkFile($path);
+        }
+        foreach (array('.parts-new-*','.parts-old-*','.pending-*') as $pattern) {
+            foreach (glob($this->public.$id.'/'.$pattern) as $path) {
+                if (is_dir($path)) $this->removeTree($path); else $this->unlinkFile($path);
             }
         }
     }
-    public function delete($id)
+    private function writePublication($id, array $data)
     {
-        $id = (int)$id; $lock = $this->lock($id);
+        $path = $this->storage.'source-'.$id.'.publication.json';
+        $temp = tempnam($this->storage,'journal-');
+        if (!$temp) throw new RuntimeException('Не удалось создать журнал публикации');
         try {
-            $this->source($id);
-            $this->db->beginTransaction();
-            $this->query('DELETE FROM ' . $this->table('copies') . ' WHERE source_id=?', array($id));
-            $this->query('DELETE FROM '.$this->table('options').' WHERE id=?',array($id));
-            $this->query('DELETE FROM ' . $this->table('sources') . ' WHERE id=?', array($id));
-            $this->db->commit();
-            $this->removeTree($this->public.$id.'/parts');
-            foreach(glob($this->storage.'source-'.$id.'-*.parts') as $partsDir)$this->removeTree($partsDir);
-            foreach (array_merge(glob($this->storage . 'source-' . $id . '-*.*'), glob($this->public . $id . '/lastfile.*')) as $path) {
-                if (is_file($path) && !unlink($path)) { throw new RuntimeException('Источник удалён, но не удалось удалить файл архива'); }
-            }
-        } catch (Throwable $e) { if ($this->db->inTransaction()) { $this->db->rollBack(); } throw $e; }
-        finally { $this->unlock($lock); }
-        return array('deleted' => true);
+            if (file_put_contents($temp,json_encode($data),LOCK_EX) === false || !rename($temp,$path)) throw new RuntimeException('Не удалось сохранить журнал публикации');
+        } finally { $this->unlinkFile($temp); }
     }
     public function save(array $data)
     {
+        $this->validateInput($data);
         $name = trim(isset($data['name']) ? $data['name'] : '');
         $url = trim(isset($data['url']) ? $data['url'] : '');
         $format = isset($data['format']) ? $data['format'] : 'xml';
@@ -246,8 +388,10 @@ class ArchiveFile
         $this->urlParts($url);
         if (!in_array($format, array('xml', 'csv', 'xlsx', 'xls', 'pdf', 'zip', 'json', 'txt'), true)) { throw new RuntimeException('Недопустимый формат'); }
         $xmlOptions = ArchiveFileXmlTools::options($data);
-        $enabled = !empty($data['enabled']) ? 1 : 0;
-        $id = isset($data['id']) ? (int)$data['id'] : 0;
+        $flag = isset($data['enabled']) ? (string)$data['enabled'] : '0';
+        if (!in_array($flag,array('0','1'),true)) throw new InvalidArgumentException('Активность источника: 0 или 1');
+        $enabled = (int)$flag;
+        $id = isset($data['id']) ? self::id($data['id'], true) : 0;
         if ($id) {
             $lock = $this->lock($id);
             try {
@@ -259,10 +403,12 @@ class ArchiveFile
                 $this->writeOptions($id,$xmlOptions);$this->db->commit();
             } finally { if($this->db->inTransaction())$this->db->rollBack();$this->unlock($lock); }
         } else {
+            try {
             $this->db->beginTransaction();
             $this->query('INSERT INTO ' . $this->table('sources') . ' (name,url,format,enabled,created_at) VALUES (?,?,?,?,?)', array($name, $url, $format, $enabled, $this->now()));
             $id = (int)$this->db->lastInsertId();
             $this->writeOptions($id,$xmlOptions);$this->db->commit();
+            } finally { if ($this->db->inTransaction()) $this->db->rollBack(); }
         }
         return $id;
     }
@@ -279,6 +425,11 @@ class ArchiveFile
             if ($handle) { fclose($handle); }
             throw new RuntimeException('Источник уже обрабатывается. Повторите позже.');
         }
+        try {
+            $this->recoverPublication($id);
+            $this->cleanup(function () use ($id) { $this->pruneOrphans($id); });
+            $this->query('UPDATE '.$this->table('events').' SET status=?,finished_at=?,message=? WHERE source_id=? AND status=?', array('error',$this->now(),'Предыдущая обработка была прервана', $id,'running'));
+        } catch (Throwable $e) { $this->unlock($handle); throw $e; }
         return $handle;
     }
     private function unlock($handle) { flock($handle, LOCK_UN); fclose($handle); }
@@ -363,46 +514,18 @@ class ArchiveFile
     }
     public static function xmlMetadata($file)
     {
-        if (!class_exists('XMLReader')) { throw new RuntimeException('Требуется PHP XMLReader'); }
-        $oldErrors = libxml_use_internal_errors(true);
-        $oldLoader = libxml_disable_entity_loader(true);
-        libxml_clear_errors();
-        $reader = new XMLReader();
-        $count = 0; $date = null; $root = false;
-        try {
-            // XMLReader may not open filenames with the global entity loader disabled;
-            // open an already-read string and never resolve external entities.
-            $content = file_get_contents($file);
-            if ($content === false || !$reader->XML($content, null, LIBXML_NONET)) { throw new RuntimeException('Не удалось прочитать XML'); }
-            $reader->setParserProperty(XMLReader::SUBST_ENTITIES, false);
-            $reader->setParserProperty(XMLReader::LOADDTD, false);
-            while ($reader->read()) {
-                if ($reader->nodeType === XMLReader::DOC_TYPE) { throw new RuntimeException('XML с DTD не поддерживается'); }
-                if ($reader->nodeType === XMLReader::ELEMENT) {
-                    $root = true;
-                    if ($reader->localName === 'offer' && $reader->getAttribute('internal-id') !== null) { $count++; }
-                    if ($reader->localName === 'generation-date' && $date === null) { $date = substr(trim($reader->readString()), 0, 190); }
-                }
-            }
-            foreach (libxml_get_errors() as $error) {
-                if ($error->level >= LIBXML_ERR_ERROR) { throw new RuntimeException('Некорректный XML: ' . trim($error->message)); }
-            }
-            if (!$root) { throw new RuntimeException('XML не содержит корневого элемента'); }
-            return array('generation_date' => $date === '' ? null : $date, 'offers_count' => $count);
-        } finally {
-            $reader->close(); libxml_clear_errors(); libxml_use_internal_errors($oldErrors); libxml_disable_entity_loader($oldLoader);
-        }
+        return ArchiveFileXmlTools::parse($file, array());
     }
     public function fetch($id, $daily = false)
     {
-        $id = (int)$id;
-        $lock = $this->lock($id); $temp = null; $final = null; $committed = false; $publicBackup = null; $published = false; $publicTarget = null; $event = null; $start = microtime(true); $status = 'error'; $message = null; $size = null; $meta = array('offers_count'=>null); $warning = null; $archiveParts = null; $partsStage = null; $partsBackup = null; $partsSwapped = false;
+        $id = self::id($id);
+        $lock = $this->lock($id); $temp = null; $final = null; $committed = false; $publicBackup = null; $publicTarget = null; $event = null; $start = microtime(true); $status = 'error'; $message = null; $size = null; $meta = array('offers_count'=>null); $warning = null; $archiveParts = null; $partsStage = null; $partsBackup = null; 
         try {
             $source = $this->source($id);
             $event = $this->beginEvent($daily ? 'daily' : 'manual', $source);
             $today = substr($this->now(), 0, 10);
             if ($daily && (!$source['enabled'] || $source['last_daily_date'] === $today)) { $status = 'skipped'; return array('skipped' => true); }
-            $temp = tempnam($this->storage, 'tmp-');
+            $temp = tempnam($this->storage, 'tmp-source-'.$id.'-');
             if ($temp === false) { throw new RuntimeException('Нет места для временного файла'); }
             $this->download($source['url'], $temp);
             clearstatcache(true,$temp); $size = filesize($temp);
@@ -430,9 +553,13 @@ class ArchiveFile
             $temp = null;
             $publicTarget = $this->public . $id . '/lastfile.' . $source['format'];
             if (is_file($publicTarget)) {
-                $publicBackup = tempnam($this->storage, 'tmp-public-');
+                $publicBackup = tempnam($this->storage, 'tmp-public-'.$id.'-');
                 if (!$publicBackup || !copy($publicTarget, $publicBackup)) { throw new RuntimeException('Не удалось подготовить обновление постоянной ссылки'); }
             }
+            $partsTarget=$this->public.$id.'/parts';
+            $partsBackup=$this->public.$id.'/.parts-old-'.bin2hex(random_bytes(6));
+            $this->writePublication($id,array('filename'=>$filename,'backup'=>$publicBackup ? basename($publicBackup) : 'tmp-public-'.$id.'-none',
+                'had_full'=>(bool)$publicBackup,'parts_backup'=>basename($partsBackup),'parts_stage'=>basename($partsStage),'had_parts'=>is_dir($partsTarget)));
             $this->db->beginTransaction();
             $this->query('INSERT INTO ' . $this->table('copies') . ' (source_id,filename,downloaded_at,generation_date,offers_count,size_bytes,sha256) VALUES (?,?,?,?,?,?,?)',
                 array($id, $filename, $now, $meta['generation_date'], $meta['offers_count'], $size, $hash));
@@ -444,14 +571,12 @@ class ArchiveFile
             $keep = array_column(array_slice($valid,0,3),'filename');
             $old = array_values(array_filter($all,function($copy) use($keep){return !in_array($copy['filename'],$keep,true);}));
             foreach ($old as $copy) { $this->query('DELETE FROM ' . $this->table('copies') . ' WHERE id=?', array($copy['id'])); }
-            $partsTarget=$this->public.$id.'/parts';
-            $partsBackup=$this->public.$id.'/.parts-old-'.bin2hex(random_bytes(6));
             if(is_dir($partsTarget)&&!rename($partsTarget,$partsBackup))throw new RuntimeException('Не удалось сохранить предыдущие части');
             if(!rename($partsStage,$partsTarget)){if(is_dir($partsBackup))rename($partsBackup,$partsTarget);throw new RuntimeException('Не удалось заменить части');}
-            $partsStage=null;$partsSwapped=true;
-            $this->publish($id, $source['format'], $final); $published = true;
+            $partsStage=null;
+            $this->publish($id, $source['format'], $final);
             $this->db->commit(); $committed = true;
-            if($partsBackup&&is_dir($partsBackup)){try{$this->removeTree($partsBackup);}catch(Throwable $cleanup){$this->modx->log(1,$cleanup->getMessage());}}
+
             foreach ($old as $copy) {
                 try{$this->removeTree($this->storage.basename($copy['filename']).'.parts');}catch(Throwable $cleanup){$this->modx->log(1,$cleanup->getMessage());}
                 $path = $this->storage . basename($copy['filename']);
@@ -465,39 +590,46 @@ class ArchiveFile
             return array('id' => $newId, 'generation_date' => $meta['generation_date'], 'offers_count' => $meta['offers_count']);
         } catch (Throwable $e) {
             $message = $e->getMessage();
-            if ($this->db->inTransaction()) { $this->db->rollBack(); }
-            if($partsSwapped&&!$committed){$this->removeTree($this->public.$id.'/parts');if($partsBackup&&is_dir($partsBackup))rename($partsBackup,$this->public.$id.'/parts');}
-            if ($published && !$committed) {
-                if ($publicBackup) { $this->publish($id, $source['format'], $publicBackup); }
-                elseif ($publicTarget && is_file($publicTarget)) { @unlink($publicTarget); }
-            }
-            if ($final && !$committed && is_file($final)) { @unlink($final); }
-            $this->query('UPDATE ' . $this->table('sources') . ' SET last_error=? WHERE id=?', array(substr($e->getMessage(), 0, 2000), $id));
+            $this->cleanup(function () { if ($this->db->inTransaction()) $this->db->rollBack(); });
+            $this->cleanup(function () use ($id, &$committed) { if (!$this->db->inTransaction()) $committed = $this->recoverPublication($id) === true || $committed; });
+            $this->cleanup(function () use ($id, $e) {
+                $this->query('UPDATE '.$this->table('sources').' SET last_error=? WHERE id=?', array(substr($e->getMessage(),0,2000),$id));
+            });
             throw $e;
         } finally {
-            if($partsStage&&is_dir($partsStage))$this->removeTree($partsStage);
-            if($archiveParts&&!$committed&&is_dir($archiveParts))$this->removeTree($archiveParts);
-            if ($publicBackup && is_file($publicBackup)) { @unlink($publicBackup); }
-            if ($temp && is_file($temp)) { @unlink($temp); }
-            $this->unlock($lock);
-            if ($event) {
-                try { $this->finishEvent($event,$status,$start,$message,$size,$meta['offers_count'],$warning); }
-                catch (Throwable $logError) { $this->modx->log(1,'ArchiveFile journal: '.$logError->getMessage()); }
+            $pending = is_file($this->storage.'source-'.$id.'.publication.json');
+            if ($committed) $this->cleanup(function () use ($id) { $this->recoverPublication($id); });
+            if (!$pending) {
+                $this->cleanup(function () use ($partsStage) { if ($partsStage) $this->removeTree($partsStage); });
+                $this->cleanup(function () use ($archiveParts,$committed) { if ($archiveParts && !$committed) $this->removeTree($archiveParts); });
+                $this->cleanup(function () use ($final,$committed) { if (!$committed) $this->unlinkFile($final); });
+                $this->cleanup(function () use ($publicBackup) { $this->unlinkFile($publicBackup); });
             }
+            $this->cleanup(function () use ($temp) { $this->unlinkFile($temp); });
+            try {
+                if ($event) $this->cleanup(function () use ($event,$status,$start,$message,$size,$meta,$warning) {
+                    $this->finishEvent($event,$status,$start,$message,$size,$meta['offers_count'],$warning);
+                });
+            } finally { $this->unlock($lock); }
         }
     }
     public function file($sourceId, $copyId = null)
     {
+        $sourceId = self::id($sourceId);
+        if ($copyId !== null) $copyId = self::id($copyId);
         $this->source($sourceId);
         $sql = 'SELECT * FROM ' . $this->table('copies') . ' WHERE source_id=?';
         $args = array((int)$sourceId);
         if ($copyId !== null) { $sql .= ' AND id=?'; $args[] = (int)$copyId; }
         $row = $this->query($sql . ' ORDER BY id DESC LIMIT 1', $args)->fetch(PDO::FETCH_ASSOC);
-        if (!$row) { throw new RuntimeException('Копия не найдена или уже удалена'); }
+        if (!$row || !$this->validCopy($row)) { throw new RuntimeException('Копия не найдена, повреждена или уже удалена'); }
         $path = $this->storage . basename($row['filename']);
         // Open before releasing to the web server so rotation cannot break a running download.
         $handle = @fopen($path, 'rb');
         if (!$handle) { throw new RuntimeException('Файл недоступен'); }
+        $stat = fstat($handle);
+        if (!$stat || (int)$stat['size'] !== (int)$row['size_bytes']) { fclose($handle); throw new RuntimeException('Размер файла изменился'); }
+        $row['size_bytes'] = $stat['size'];
         return array($row, $handle);
     }
 }

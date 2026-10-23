@@ -5,7 +5,12 @@ class ArchiveFileXmlTools
     public static function options(array $input)
     {
         $o = array('offer_element'=>'offer','offer_attribute'=>'internal-id','date_element'=>'generation-date','container_path'=>'','split_enabled'=>0,'split_limit'=>1000);
-        foreach ($o as $k=>$v) if (isset($input[$k])) $o[$k] = is_string($v) ? trim((string)$input[$k]) : (int)$input[$k];
+        foreach ($o as $k=>$v) if (isset($input[$k])) {
+            if (!is_scalar($input[$k])) throw new InvalidArgumentException('Недопустимое значение: '.$k);
+            if (!is_string($v) && !preg_match('/^[0-9]+$/D',(string)$input[$k])) throw new InvalidArgumentException('Нужно целое число: '.$k);
+            $o[$k] = is_string($v) ? trim((string)$input[$k]) : (int)$input[$k];
+        }
+        if (!in_array($o['split_enabled'],array(0,1),true)) throw new InvalidArgumentException('Разделение: 0 или 1');
         foreach (array('offer_element','offer_attribute','date_element') as $k) {
             if ($o[$k] === '' && $k !== 'offer_element') continue;
             if (!preg_match('/^[A-Za-z_][A-Za-z0-9_.-]{0,99}$/D',$o[$k])) throw new RuntimeException('Недопустимое XML-имя: '.$k);
@@ -27,7 +32,7 @@ class ArchiveFileXmlTools
     /** XMLReader retains only the current node; skeleton and offers are spooled to disk. */
     private static function scan($file,array $options,$skeleton=null,$offers=null)
     {
-        $o=self::options($options);$errors=libxml_use_internal_errors(true);$loader=libxml_disable_entity_loader(false);libxml_clear_errors();
+        $o=self::options($options);$errors=libxml_use_internal_errors(true);$loader=(PHP_VERSION_ID < 80000 ? libxml_disable_entity_loader(false) : null);libxml_clear_errors();
         $reader=new XMLReader();$count=0;$date=null;$dateSeen=false;$sample=null;$stack=array();$seq=0;$parentId=null;$containers=0;$skip=null;$root=false;$insert=null;
         try {
             // XMLReader::open needs the primary local file loader; DTD/entity loading remains disabled.
@@ -71,7 +76,7 @@ class ArchiveFileXmlTools
             if(!$root)throw new RuntimeException('XML не содержит корневого элемента');
             if($o['container_path']!==''&&$containers!==1)throw new RuntimeException('Контейнер должен находиться ровно один раз');
             return array('options'=>$o,'offers_count'=>$count,'generation_date'=>$date===''?null:$date,'sample'=>$sample,'insert'=>$insert);
-        }finally{$reader->close();libxml_clear_errors();libxml_use_internal_errors($errors);libxml_disable_entity_loader($loader);}
+        }finally{$reader->close();libxml_clear_errors();libxml_use_internal_errors($errors);if (PHP_VERSION_ID < 80000) libxml_disable_entity_loader($loader);}
     }
     public static function parse($file,array $options)
     {
@@ -87,8 +92,8 @@ class ArchiveFileXmlTools
         if(!$skeleton||!$spool){if($skeleton)fclose($skeleton);if($spool)fclose($spool);throw new RuntimeException('Не удалось создать временные файлы частей');}
         try{
             self::write($spool,'<archivefile-spool>');$shape=self::scan($file,$o,$skeleton,$spool);self::write($spool,'</archivefile-spool>');fflush($spool);fflush($skeleton);
-            $uri=stream_get_meta_data($spool)['uri'];$loader=libxml_disable_entity_loader(false);
-            try{if(!$spoolReader->open($uri,null,LIBXML_NONET))throw new RuntimeException('Не удалось прочитать предложения');}finally{libxml_disable_entity_loader($loader);}
+            $uri=stream_get_meta_data($spool)['uri'];$loader=(PHP_VERSION_ID < 80000 ? libxml_disable_entity_loader(false) : null);
+            try{if(!$spoolReader->open($uri,null,LIBXML_NONET))throw new RuntimeException('Не удалось прочитать предложения');}finally{if (PHP_VERSION_ID < 80000) libxml_disable_entity_loader($loader);}
             $spoolReader->setParserProperty(XMLReader::LOADDTD,false);$spoolReader->setParserProperty(XMLReader::SUBST_ENTITIES,false);
             $number=0;$inPart=0;$total=0;$skip=null;$name=null;$path=null;
             while($spoolReader->read()){
