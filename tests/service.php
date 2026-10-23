@@ -42,6 +42,7 @@ define('MODX_ASSETS_PATH', $storage . 'assets/');
 $modx = new FakeModx($storage);
 $service = new FixtureService($modx);
 try {
+    check($service->cronCommand()==='/usr/bin/php7.4 '.MODX_CORE_PATH.'components/archivefile/cron.php','cron command uses PHP 7.4 without unnecessary quotes');
     check(!($modx->getConnection() instanceof PDO) && !method_exists($modx->getConnection(), 'prepare'), 'MODX connection wrapper has no prepare method');
     $a = $service->save(array('name' => 'Источник А', 'url' => 'https://example.org/feed.xml', 'enabled' => 1));
     $b = $service->save(array('name' => 'Источник Б', 'url' => 'https://example.org/other.xml', 'enabled' => 1));

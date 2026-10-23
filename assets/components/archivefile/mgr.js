@@ -16,11 +16,20 @@
     }
     function cell(row, value, cls) { var td = document.createElement('td'); td.textContent = value === null || value === undefined ? '—' : value; if (cls) td.className = cls; row.appendChild(td); return td; }
     function button(text, fn) { var b = document.createElement('button'); b.type = 'button'; b.textContent = text; b.onclick = fn; return b; }
-    function icon(label, glyph, fn) { var b=button(glyph,fn);b.title=label;b.setAttribute('aria-label',label);b.className='fa-icon';return b; }
+    function decorateIcon(el,label,glyph) {
+      var codes={'⚙':'\uf013','↻':'\uf021','⧉':'\uf0c5','×':'\uf1f8','↓':'\uf019'};
+      el.textContent='';el.title=label;el.setAttribute('aria-label',label);el.className='fa-icon'+(glyph==='×'?' fa-danger':'');
+      var mark=document.createElement('span');mark.className='fa-glyph';mark.setAttribute('aria-hidden','true');mark.textContent=codes[glyph]||glyph;el.appendChild(mark);
+      return el;
+    }
+    function icon(label, glyph, fn) {return decorateIcon(button('',fn),label,glyph);}
+    function markSelected(id) {
+      root.querySelectorAll('#fa-sources>tr[data-source-id]').forEach(function(row){var selected=Number(row.getAttribute('data-source-id'))===Number(id);row.classList.toggle('fa-selected',selected);var trigger=row.querySelector('button');if(trigger){trigger.setAttribute('aria-expanded',selected?'true':'false');trigger.setAttribute('aria-controls','fa-detail');}});
+    }
     function closeDetail() {
       detail.hidden = true; root.appendChild(detail);
       if (expanded && expanded.parentNode) expanded.parentNode.removeChild(expanded);
-      expanded = null; current = 0;
+      expanded = null; current = 0;markSelected(0);
     }
     function refresh(id) {
       if (busy) return; setBusy(true); notify('Скачивание и проверка файла…');
@@ -52,13 +61,15 @@
       var rows=s&&s.parts||[],tbody=document.getElementById('fa-parts');tbody.textContent='';document.getElementById('fa-parts-block').hidden=!rows.length;
       rows.forEach(function(p,i){var tr=document.createElement('tr');cell(tr,p.filename);cell(tr,p.offers_count);cell(tr,(Number(p.size_bytes)/1024).toFixed(1)+' КБ');
         var td=cell(tr,''),actions=document.createElement('div');actions.className='fa-actions';td.appendChild(actions);
-        var a=document.createElement('a');a.href=p.url;a.textContent='↓';a.title='Скачать часть';a.setAttribute('aria-label',a.title);a.className='fa-icon';a.target='_blank';a.rel='noopener';actions.appendChild(a);
+        var a=document.createElement('a');a.href=p.url;decorateIcon(a,'Скачать часть','↓');a.target='_blank';a.rel='noopener';actions.appendChild(a);
         actions.appendChild(icon('Копировать ссылку на часть','⧉',function(){copy(p.url);}));tbody.appendChild(tr);});
     }
     function load() {
       return api('list').then(function (data) {
         sources = data.sources;
         document.getElementById('fa-cron').textContent = data.cron;
+        document.getElementById('fa-cron').setAttribute('data-ready','1');
+        if(!busy) document.getElementById('fa-copy-cron').disabled=false;
         var monitor = data.monitor || {stale:true,hours:36,last:null}, lastRun = monitor.last;
         var status = document.getElementById('fa-monitor');
         status.textContent = lastRun ? 'Последний запуск cron: '+date(lastRun.started_at)+' · '+(lastRun.status==='running'?'Выполняется':lastRun.status==='ok'?'Успешно':'Ошибка')+' · '+(lastRun.message||'') : 'Cron ещё не запускался. Ручное скачивание не считается запуском cron.';
@@ -79,19 +90,20 @@
         var tbody = document.getElementById('fa-sources'); tbody.textContent = '';
         sources.forEach(function (s) {
           var row = document.createElement('tr'), last = s.latest || {};
-          cell(row, s.name); cell(row, date(last.generation_date),'fa-feed-date'); cell(row, last.offers_count); cell(row, date(s.last_success));
+          cell(row, s.name,'fa-name'); cell(row, date(last.generation_date),'fa-feed-date'); cell(row, last.offers_count); cell(row, date(s.last_success));
           cell(row, s.last_error || s.warning || (!s.enabled || s.enabled === '0' ? 'Отключено' : s.last_success ? 'Успешно' : 'Ещё не скачивалось'), s.last_error ? 'fa-error' : s.warning ? 'fa-warning' : 'fa-ok');
           row.setAttribute('data-source-id',s.id);
           var td=cell(row,''), actions=document.createElement('div');actions.className='fa-actions';td.appendChild(actions);
           actions.appendChild(icon('Настройки и последние 3 копии','⚙',function(){if(!busy){if(current===Number(s.id)&&!detail.hidden)closeDetail();else open(s);}}));
           actions.appendChild(icon('Принудительно скачать новую копию','↻',function(){refresh(s.id);}));
-          if(s.latest){var a=document.createElement('a');a.href=s.latest.url;a.textContent='↓';a.className='fa-icon';a.title='Скачать последнюю копию';a.setAttribute('aria-label',a.title);a.target='_blank';a.rel='noopener';actions.appendChild(a);}
+          if(s.latest){var a=document.createElement('a');a.href=s.latest.url;decorateIcon(a,'Скачать последнюю копию','↓');a.target='_blank';a.rel='noopener';actions.appendChild(a);}
           actions.appendChild(icon('Копировать постоянную ссылку','⧉',function(){copy(s.latest_url);}));
           actions.appendChild(icon('Удалить источник и архив','×',function(){removeSource(s);}));
           tbody.appendChild(row);
         });
         var showDate=sources.some(function(s){return s.latest&&s.latest.generation_date&&(!s.xml_options||s.xml_options.date_element);});
         document.getElementById('fa-sources').parentNode.querySelectorAll('.fa-feed-date').forEach(function(el){el.hidden=!showDate;});
+        markSelected(current);
         if(current){var selected=sources.find(function(s){return Number(s.id)===current;});if(selected)open(selected);else closeDetail();}
         if (!sources.length) { var tr = document.createElement('tr'); cell(tr, 'Добавьте первую ссылку').colSpan = 6; tbody.appendChild(tr); }
       });
@@ -108,7 +120,7 @@
           }
           cell(tr, count); cell(tr, (Number(c.size_bytes) / 1024).toLocaleString('ru-RU', {maximumFractionDigits: 1}) + ' КБ');
           var td = cell(tr, ''), actions = document.createElement('div'); actions.className = 'fa-actions';
-          var a = document.createElement('a'); a.href = c.url; a.textContent = '↓'; a.className='fa-icon';a.title='Скачать копию';a.setAttribute('aria-label',a.title); a.target = '_blank'; a.rel = 'noopener'; actions.appendChild(a);
+          var a = document.createElement('a'); a.href = c.url; decorateIcon(a,'Скачать копию','↓'); a.target = '_blank'; a.rel = 'noopener'; actions.appendChild(a);
           actions.appendChild(icon('Копировать ссылку на копию','⧉',function(){copy(c.url);})); td.appendChild(actions); tbody.appendChild(tr);
         });
         var showDate=form.elements.date_element.value!==''&&rows.some(function(c){return !!c.generation_date;});
@@ -127,7 +139,7 @@
         var td=document.createElement('td');td.colSpan=6;expanded.appendChild(td);
         row.parentNode.insertBefore(expanded,row.nextSibling);td.appendChild(detail);
       }else{message.parentNode.insertBefore(detail,message.nextSibling);}
-      detail.hidden = false;
+      detail.hidden = false;markSelected(current);
       document.getElementById('fa-title').textContent = s ? 'Настройки источника — '+s.name : 'Настройки нового источника';
       form.elements.id.value = current; form.elements.name.value = s ? s.name : ''; form.elements.url.value = s ? s.url : '';
       form.elements.format.value = s ? s.format : 'xml'; form.elements.enabled.checked = s ? Number(s.enabled) === 1 : true;
@@ -141,6 +153,7 @@
       document.getElementById('fa-xml-options').hidden=form.elements.format.value!=='xml';document.getElementById('fa-preview-result').textContent='';showParts(s);
       form.elements.name.focus();
     }
+    document.getElementById('fa-copy-cron').onclick=function(){var command=document.getElementById('fa-cron');if(command.getAttribute('data-ready')==='1')copy(command.textContent);};
     document.getElementById('fa-add').onclick = function () { open(null); };
     document.getElementById('fa-close').onclick = function () { closeDetail(); };
     document.getElementById('fa-copy-latest').onclick = function () { copy(document.getElementById('fa-latest-url').value); };

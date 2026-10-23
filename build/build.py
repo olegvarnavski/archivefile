@@ -6,7 +6,7 @@ import shutil
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SIGNATURE = 'archivefile-1.4.1-pl'
+SIGNATURE = 'archivefile-1.5.0-pl'
 DIST = ROOT / 'dist'
 STAGE = DIST / SIGNATURE
 
@@ -54,10 +54,10 @@ def build():
     manifest = {
         'manifest-version': '1.1',
         'manifest-attributes': {
-            'package_name': 'Archive File', 'package_version': '1.4.1',
+            'package_name': 'Archive File', 'package_version': '1.5.0',
             'readme': (ROOT / 'README.md').read_text(),
             'license': (ROOT / 'LICENSE.txt').read_text(),
-            'changelog': '1.4.1-pl: Stream XML metadata and splitting via XMLReader; use disk-backed temporary files instead of a full-feed DOM. Fix large-feed memory rejection; add a >24 MiB XML test under PHP 7.4 memory_limit=32M.'
+            'changelog': '1.5.0-pl: MODX 2.8 manager styling, FontAwesome actions, selected source and accessible disclosure; unquoted cron command for ordinary paths and Copy command button. Streaming XML retained.'
         },
         'manifest-vehicles': [{
             'vehicle_package': 'transport', 'vehicle_class': 'xPDOScriptVehicle',

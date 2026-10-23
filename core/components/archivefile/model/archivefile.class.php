@@ -22,6 +22,15 @@ class ArchiveFile
         $this->public = MODX_ASSETS_PATH . 'archivefile/';
         $this->storage = rtrim($modx->getOption('archivefile.storage_path', null, MODX_CORE_PATH . 'components/archivefile/storage/'), '/\\') . '/';
     }
+    public function cronCommand()
+    {
+        $argument = function ($path) {
+            // Normal absolute hosting paths need no quotes; unusual paths remain shell-safe.
+            return preg_match('~^/[A-Za-z0-9_./-]+$~D', $path) ? $path : escapeshellarg($path);
+        };
+        return $argument((string)$this->modx->getOption('archivefile.cron_php_path', null, '/usr/bin/php7.4'))
+            . ' ' . $argument(MODX_CORE_PATH . 'components/archivefile/cron.php');
+    }
     public function query($sql, array $params = array())
     {
         $s = $this->db->prepare($sql);

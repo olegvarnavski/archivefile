@@ -5,9 +5,9 @@ const template=fs.readFileSync(base+'/core/components/archivefile/templates/home
 const dom=new JSDOM('<ul><li id="archivefile">Archive File menu</li></ul>'+template,{url:'https://example.org/manager/',runScripts:'outside-only'});
 const w=dom.window,d=w.document;w.ArchiveFileConfig={connector:'/connector',csrf:'test'};
 let sources=[{id:1,name:'Каталог',url:'https://example.org/feed.xml',format:'xml',enabled:1,latest:{offers_count:42},xml_options:{offer_element:'item',offer_attribute:'',date_element:'',container_path:'catalog/items',split_enabled:1,split_limit:1000},parts:[{filename:'part-001.xml',offers_count:1000,size_bytes:12000,url:'/parts/part-001.xml'}],latest_url:'https://example.org/assets/archivefile/source-1.xml'}],calls=[];
-w.confirm=()=>true;d.execCommand=()=>true;
+let copied='';w.confirm=()=>true;d.execCommand=()=>{copied=d.querySelector('textarea').value;return true;};
 w.fetch=async(url,opt)=>{let p=opt.body,a=p.get('action');calls.push(a);let data;
-if(a==='list')data={sources,cron:'php cron.php',monitor:{stale:true,hours:36,last:null},events:[{id:1,source_name:'Каталог',kind:'manual',status:'error',started_at:'2026-10-13T03:00:00+03:00',duration_ms:123,size_bytes:null,offers_count:0,message:'XML без предложений',warning:null}]};
+if(a==='list')data={sources,cron:'/usr/bin/php7.4 /home/user/site/public_html/core/components/archivefile/cron.php',monitor:{stale:true,hours:36,last:null},events:[{id:1,source_name:'Каталог',kind:'manual',status:'error',started_at:'2026-10-13T03:00:00+03:00',duration_ms:123,size_bytes:null,offers_count:0,message:'XML без предложений',warning:null}]};
 if(a==='copies')data=Array.from({length:3},(_,i)=>({id:i,offers_count:42-i,size_bytes:1024,url:'/copy/'+i}));
 if(a==='preview')data={offers_count:2500,generation_date:null,sample:'<item/>',parts_count:3,valid:true};
 if(a==='fetch')data={id:6};
@@ -20,6 +20,10 @@ async function wait(fn){for(let i=0;i<100;i++){if(fn())return;await new Promise(
 
 d.querySelector('button[aria-label="Настройки и последние 3 копии"]').click();await wait(()=>d.querySelectorAll('#fa-copies tr').length===3);
 check(d.querySelector('#fa-expanded #fa-detail'),'details inside source table');
+d.querySelector('#fa-copy-cron').click();check(copied==='/usr/bin/php7.4 /home/user/site/public_html/core/components/archivefile/cron.php','copy cron preserves unquoted command');
+check(d.querySelector('tr[data-source-id="1"]').classList.contains('fa-selected'),'expanded source highlighted');
+check(d.querySelector('button[aria-controls="fa-detail"]').getAttribute('aria-expanded')==='true','settings button exposes expanded state');
+check(d.querySelector('button[aria-label="Удалить источник и архив"] .fa-glyph[aria-hidden="true"]'),'manager icon has accessible label');
 check(d.querySelector('#fa-monitor').textContent.includes('36'),'cron overdue warning visible');
 check(d.querySelector('#fa-events').textContent.includes('XML без предложений'),'journal shows failure reason');
 check(d.querySelector('#archivefile').textContent==='Archive File menu' && !d.querySelector('#archivefile #fa-detail'),'MODX menu ID collision does not move panel into menu');
