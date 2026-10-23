@@ -19,16 +19,19 @@ class ObjectStub {
     public $fields = array(); private $modx; private $class;
     public function __construct($modx, $class) { $this->modx = $modx; $this->class = $class; }
     public function fromArray($fields, $prefix = '', $setPrimaryKeys = false, $raw = false) { $this->fields = array_merge($this->fields, $fields); }
+    public function toArray() { return $this->fields; }
     public function set($key, $value) { $this->fields[$key] = $value; }
     public function get($key) { return $this->fields[$key] ?? null; }
     public function save() {
         $key = $this->fields['key'] ?? $this->fields['name'] ?? $this->fields['text'];
         $this->modx->objects[$this->class][$key] = $this; return true;
     }
-    public function remove() { unset($this->modx->objects[$this->class][$this->fields['text']]); return true; }
+    public function remove() { $key=$this->fields['key'] ?? $this->fields['name'] ?? $this->fields['text']; unset($this->modx->objects[$this->class][$key]); return true; }
 }
 class CacheStub {
+    public $failCopy = false;
     public function copyTree($from, $to) {
+        if ($this->failCopy && strpos($to,'assets/components/archivefile')!==false) { file_put_contents($to.'mgr.js','broken'); return false; }
         if (!is_dir($to)) { mkdir($to, 0750, true); }
         foreach (new DirectoryIterator($from) as $f) {
             if ($f->isDot()) { continue; }
@@ -40,6 +43,8 @@ class CacheStub {
     public function refresh() { return true; }
 }
 class modX extends xPDO {
+    public $version = '2.8.5-pl';
+    public function getVersionData() { return array('full_version'=>$this->version); }
     public $objects = array(); public $pdo; private $cache;
     public function __construct() { $this->pdo = new TestPDO('sqlite::memory:'); $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION); $this->cache = new CacheStub(); }
     public function connect() { return true; }
@@ -64,9 +69,9 @@ $temp = sys_get_temp_dir() . '/archivefile-install-' . bin2hex(random_bytes(6)) 
 mkdir($temp . 'core', 0750, true); mkdir($temp . 'assets', 0750, true);
 define('MODX_CORE_PATH', $temp . 'core/'); define('MODX_ASSETS_PATH', $temp . 'assets/'); define('MODX_BASE_PATH', $temp); define('MODX_ASSETS_URL', '/assets/');
 file_put_contents($temp . 'config.core.php', '<?php // test bootstrap');
-$stage = dirname(__DIR__) . '/dist/archivefile-1.5.0-pl/';
+$stage = dirname(__DIR__) . '/dist/archivefile-1.5.1-pl/';
 $manifest = include $stage . 'manifest.php';
-$transport = (object)array('xpdo' => new modX(), 'path' => dirname($stage) . '/', 'signature' => 'archivefile-1.5.0-pl');
+$transport = (object)array('xpdo' => new modX(), 'path' => dirname($stage) . '/', 'signature' => 'archivefile-1.5.1-pl');
 $vehicle = new xPDOScriptVehicle();
 $vehicle->payload = include $stage . $manifest['manifest-vehicles'][0]['filename'];
 try {
@@ -83,6 +88,22 @@ try {
     check($vehicle->install($transport, array('package_action' => xPDOTransport::ACTION_UPGRADE)), 'upgrade succeeds');
     check($service->xmlOptions(1)['split_limit']===750 && $service->xmlOptions(1)['offer_element']==='item','upgrade preserves XML options');
     check(count($service->sources()) === 1 && $service->source(1)['name'] === 'Моё название', 'upgrade preserves settings and does not duplicate source');
+    $js=MODX_ASSETS_PATH.'components/archivefile/mgr.js';
+    $before=file_get_contents($js); $public=MODX_ASSETS_PATH.'archivefile/1/';
+    mkdir($public,0755,true);file_put_contents($public.'lastfile.xml','unchanged');mkdir($public.'parts');file_put_contents($public.'parts/manifest.json','[]');
+    check($vehicle->install($transport,array('package_action'=>xPDOTransport::ACTION_UPGRADE)), 'repeat upgrade with existing publications');
+    check(file_get_contents($public.'lastfile.xml')==='unchanged' && is_file($public.'parts/manifest.json'),'upgrade never republishes full file or parts');
+    $lock=fopen(MODX_CORE_PATH.'components/archivefile/storage/source-1.lock','c');flock($lock,LOCK_EX);
+    check(!$vehicle->install($transport,array('package_action'=>xPDOTransport::ACTION_UPGRADE)),'upgrade refuses active source operation');
+    flock($lock,LOCK_UN);fclose($lock);
+    check(file_get_contents($js)===$before,'busy preflight leaves code unchanged');
+    $transport->xpdo->getCacheManager()->failCopy=true;
+    check(!$vehicle->install($transport,array('package_action'=>xPDOTransport::ACTION_UPGRADE)),'injected partial installation fails');
+    $transport->xpdo->getCacheManager()->failCopy=false;
+    check(file_get_contents($js)===$before && is_file(MODX_CORE_PATH.'components/archivefile/runtime.php'),'failed file copy restores previous code and runtime');
+    $transport->xpdo->version='3.2.0-pl';
+    check(!$vehicle->install($transport,array('package_action'=>xPDOTransport::ACTION_UPGRADE)),'MODX 3 rejected before file replacement');
+    $transport->xpdo->version='2.8.5-pl';
     check($vehicle->uninstall($transport, array('package_action' => xPDOTransport::ACTION_UNINSTALL)), 'uninstall succeeds');
     check($transport->xpdo->getObject('modMenu', 'archivefile') === null, 'uninstall removes menu');
     check($transport->xpdo->getOption('archivefile.installed') === '0', 'uninstall disables endpoints');

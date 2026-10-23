@@ -1,0 +1,44 @@
+name: Archive File checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  php74:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: archivefile_test_only
+          MYSQL_DATABASE: archivefile_ci
+          MYSQL_ROOT_HOST: "%"
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -parchivefile_test_only"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '7.4'
+          extensions: curl, dom, xmlreader, pdo_mysql, pdo_sqlite
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: find core assets build -name '*.php' -print0 | xargs -0 -n1 php -l
+      - run: python3 build/build.py
+      - run: php tests/service.php
+      - run: php tests/install.php
+      - run: php tests/large-xml.php
+      - run: python3 tests/recovery.py
+      - run: python3 tests/package.py
+      - run: php tests/mysql.php
+        env:
+          ARCHIVEFILE_TEST_MYSQL_DSN: mysql:host=127.0.0.1;port=3306;dbname=archivefile_ci;charset=utf8mb4
+          ARCHIVEFILE_TEST_MYSQL_USER: root
+          ARCHIVEFILE_TEST_MYSQL_PASSWORD: archivefile_test_only
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test

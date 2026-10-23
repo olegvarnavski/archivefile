@@ -1,6 +1,6 @@
 {
   "name": "modx-archivefile",
-  "version": "1.2.0",
+  "version": "1.5.1",
   "private": true,
   "description": "UI regression tests for Archive File MODX extra",
   "scripts": {
